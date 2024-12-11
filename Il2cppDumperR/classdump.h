@@ -1,14 +1,4 @@
-bool is_class_dumped(std::string &className)
-{
-    for (const auto &classInfo : il2cpp_classes)
-    {
-        if (classInfo["full_name"] == className)
-        {
-            return true;
-        }
-    }
-    return false;
-}
+#pragma once
 
 void dump_class(Il2CppClass *klass, void *userData)
 {
@@ -16,18 +6,14 @@ void dump_class(Il2CppClass *klass, void *userData)
     {
         // check if we already dumped this class
         const char *class_name = il2cpp_class_get_name(klass);
-        const char *assembly_name = il2cpp_class_get_assemblyname(klass);
         const char *namespace_name = il2cpp_class_get_namespace(klass);
+        const char *image_name = il2cpp_image_get_name(il2cpp_class_get_image(klass));
 
-        std::string full_name = std::string(il2cpp_class_get_namespace(klass)) + "." + class_name;
-
-        if (is_class_dumped(full_name))
+        if (!il2cpp_dump[image_name][namespace_name][class_name].is_null())
             return;
 
         nlohmann::json classInfo;
-        classInfo["name"] = class_name;
-        classInfo["namespace"] = namespace_name;
-        classInfo["full_name"] = full_name;
+
         classInfo["is_interface"] = il2cpp_class_is_interface(klass);
 
         if (strcmp(class_name, "Object") && !classInfo["is_interface"]) // Object class doesn't have parents
@@ -36,10 +22,9 @@ void dump_class(Il2CppClass *klass, void *userData)
         classInfo["token"] = il2cpp_class_get_type_token(klass);
         classInfo["is_enum"] = il2cpp_class_is_enum(klass);
         classInfo["flags"] = il2cpp_class_get_flags(klass);
-        classInfo["image"] = il2cpp_image_get_name(il2cpp_class_get_image(klass));
         classInfo["type"] = il2cpp_type_get_name(il2cpp_class_get_type(klass));
         classInfo["rank"] = il2cpp_class_get_rank(klass);
-        classInfo["assembly_name"] = assembly_name;
+        classInfo["assembly_name"] = il2cpp_class_get_assemblyname(klass);
 
         // might be unnecessary
         classInfo["is_valuetype"] = il2cpp_class_is_valuetype(klass);
@@ -63,7 +48,6 @@ void dump_class(Il2CppClass *klass, void *userData)
             fieldInfo["name"] = il2cpp_field_get_name(field);
             fieldInfo["flags"] = il2cpp_field_get_flags(field);
             fieldInfo["offset"] = il2cpp_field_get_offset(field);
-            fieldInfo["type"] = il2cpp_type_get_name(il2cpp_field_get_type(field));
 
             fields.push_back(fieldInfo);
         }
@@ -83,7 +67,10 @@ void dump_class(Il2CppClass *klass, void *userData)
             methodInfo["return_type"] = il2cpp_type_get_name(il2cpp_method_get_return_type(method));
             methodInfo["token"] = il2cpp_method_get_token(method);
             methodInfo["is_generic"] = il2cpp_method_is_generic(method);
-            methodInfo["offset"] = (uintptr_t)(method->methodPointer) - (uintptr_t)il2cppHandle;
+
+            uintptr_t methodPointer = (uintptr_t)(method->methodPointer) - (uintptr_t)il2cppHandle;
+            if (methodPointer < 1000000000000000) // abstract pointers dont make a whole lot of sense
+                methodInfo["offset"] = methodPointer;
 
             methodInfo["param_count"] = il2cpp_method_get_param_count(method);
             if (class_name_str.substr(class_name_str.size() - 2) != "[]")
@@ -124,24 +111,32 @@ void dump_class(Il2CppClass *klass, void *userData)
 
                 if (methodName == expectedGetName)
                 {
+                    const MethodInfo *get_method = il2cpp_property_get_get_method(property);
                     propertyInfo["get_method"] = method;
-                    propertyInfo["type"] = il2cpp_type_get_name(il2cpp_method_get_return_type(il2cpp_property_get_get_method(property)));
+                    propertyInfo["type"] = il2cpp_type_get_name(il2cpp_method_get_return_type(get_method));
                 }
+
                 if (methodName == expectedSetName)
                 {
+                    const MethodInfo *set_method = il2cpp_property_get_set_method(property);
                     propertyInfo["set_method"] = method;
-                    propertyInfo["type"] = il2cpp_type_get_name(il2cpp_method_get_param(il2cpp_property_get_set_method(property), 0));
+                    propertyInfo["type"] = il2cpp_type_get_name(il2cpp_method_get_return_type(set_method));
                 }
             }
 
             properties.push_back(propertyInfo);
         }
 
-        classInfo["fields"] = fields;
-        classInfo["methods"] = methods;
-        classInfo["properties"] = properties;
+        // Add everything to classInfo
+        if (!fields.is_null())
+            classInfo["fields"] = fields;
+        if (!methods.is_null())
+            classInfo["methods"] = methods;
+        if (!properties.is_null())
+            classInfo["properties"] = properties;
 
-        il2cpp_classes.push_back(classInfo);
+        // Add to global dump JSON
+        il2cpp_dump[image_name][namespace_name][class_name] = classInfo;
 
         std::cout << "Finished Dumping Class: " << class_name << std::endl;
     }

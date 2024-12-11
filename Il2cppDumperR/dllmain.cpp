@@ -12,7 +12,7 @@
 HMODULE il2cppHandle;
 Il2CppDomain *il2cpp_domain;
 const Il2CppImage *il2cpp_corlib;
-nlohmann::json il2cpp_classes;
+nlohmann::json il2cpp_dump;
 
 #include "il2cpp/il2cpp-wrapper.h"
 #include "classdump.h"
@@ -49,16 +49,16 @@ static DWORD WINAPI MainThread(LPVOID lpReserved)
     std::cout << "Finished Dumping All Classes!" << std::endl;
 
     // delete the file if it already exists
-    DeleteFile(L"il2cpp_classes.json");
+    DeleteFile(L"il2cpp_dump.json");
 
     // write to file
     WriteFile(
-        CreateFile(L"il2cpp_classes.json", GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr),
-        il2cpp_classes.dump(4).c_str(), il2cpp_classes.dump(4).length(), nullptr, nullptr);
+        CreateFile(L"il2cpp_dump.json", GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr),
+        il2cpp_dump.dump(4).c_str(), il2cpp_dump.dump(4).length(), nullptr, nullptr);
+
+    std::cout << "Created JSON file at the game's folder." << std::endl;
 
     il2cpp_thread_detach(il2cpp_thread_current());
-
-    std::cout << "Created JSON file at the game's folder. Done!" << std::endl;
 
     // close console
     fclose(fp);
