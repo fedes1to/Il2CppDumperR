@@ -9,7 +9,7 @@ void dump_class(Il2CppClass *klass, void *userData)
         const char *namespace_name = il2cpp_class_get_namespace(klass);
         const char *image_name = il2cpp_image_get_name(il2cpp_class_get_image(klass));
 
-        if (!il2cpp_dump[image_name][namespace_name][class_name].is_null())
+        if (!il2cpp_classes[image_name][namespace_name][class_name].is_null())
             return;
 
         nlohmann::json classInfo;
@@ -136,7 +136,7 @@ void dump_class(Il2CppClass *klass, void *userData)
             classInfo["properties"] = properties;
 
         // Add to global dump JSON
-        il2cpp_dump[image_name][namespace_name][class_name] = classInfo;
+        il2cpp_classes[image_name][namespace_name][class_name] = classInfo;
 
         std::cout << "Finished Dumping Class: " << class_name << std::endl;
     }
