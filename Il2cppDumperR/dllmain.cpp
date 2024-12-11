@@ -42,7 +42,6 @@ void dump_class(Il2CppClass* klass, void* userData) {
         classInfo["namespace"] = namespace_name;
         classInfo["full_name"] = full_name;
         classInfo["is_interface"] = il2cpp_class_is_interface(klass);
-		classInfo["offset"] = (uintptr_t)klass - (intptr_t)il2cppHandle;
 
         if (strcmp(class_name, "Object") and !classInfo["is_interface"]) // Object class doesn't have parents
             classInfo["parent"] = il2cpp_class_get_name(il2cpp_class_get_parent(klass));
@@ -95,7 +94,7 @@ void dump_class(Il2CppClass* klass, void* userData) {
 			methodInfo["return_type"] = il2cpp_type_get_name(il2cpp_method_get_return_type(method));
 			methodInfo["token"] = il2cpp_method_get_token(method);
             methodInfo["is_generic"] = il2cpp_method_is_generic(method);
-            methodInfo["offset"] = (uintptr_t)method - (intptr_t)il2cppHandle;
+            methodInfo["offset"] = (uintptr_t)(method->methodPointer) - (uintptr_t)il2cppHandle;
 
             methodInfo["param_count"] = il2cpp_method_get_param_count(method);
             if (class_name_str.substr(class_name_str.size() - 2) != "[]") {

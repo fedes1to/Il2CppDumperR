@@ -2,5 +2,6 @@
  Runtime dumper for Il2cpp Games
 
 TODO:
-- Offsets
 - Strings
+- DummyDll creation
+- dump.cs creation

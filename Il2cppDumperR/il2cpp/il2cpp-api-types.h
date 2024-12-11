@@ -193,3 +193,8 @@ typedef uintptr_t il2cpp_array_size_t;
 #define ARRAY_LENGTH_AS_INT32(a) ((int32_t)a)
 
 typedef uint8_t (*Il2CppAndroidUpStateFunc)(const char* ifName, uint8_t* is_up);
+
+// this is extremely stupid
+typedef struct MethodInfo {
+    Il2CppMethodPointer methodPointer;
+} MethodInfo;
