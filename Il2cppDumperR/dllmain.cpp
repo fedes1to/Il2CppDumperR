@@ -49,9 +49,6 @@ static DWORD WINAPI MainThread(LPVOID lpReserved)
 
     std::cout << "Finished Dumping All Classes!" << std::endl;
 
-	// Get s_StringLiteralTable from GameAssembly.dll using InitializeStringLiteralTable
-    auto targetString_ptr = sigz::scan_image_first("GameAssembly.dll", sigz::make_sig<sigz::ida>("E8 ? ? ? ? 48 89 05 ? ? ? ? 48 83 C4 28 C3 CC CC CC"));
-
     // delete the file if it already exists
     DeleteFile(L"il2cpp_class_dump.json");
 
@@ -62,9 +59,8 @@ static DWORD WINAPI MainThread(LPVOID lpReserved)
 
     std::cout << "Created JSON file at the game's folder." << std::endl;
 
-    // strings
-
-
+    // Get s_StringLiteralTable from GameAssembly.dll using InitializeStringLiteralTable
+    auto targetString_ptr = sigz::scan_image_first("GameAssembly.dll", sigz::make_sig<sigz::ida>("E8 ? ? ? ? 48 89 05 ? ? ? ? 48 83 C4 28 C3 CC CC CC"));
 
     il2cpp_thread_detach(il2cpp_thread_current());
 
