@@ -13,4 +13,4 @@
 #include <string>
 #include <MinHook.h>
 
-#endif //PCH_H
+#endif // PCH_H

@@ -139,6 +139,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="classdump.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="il2cpp\il2cpp-api-functions.h" />
     <ClInclude Include="il2cpp\il2cpp-api-types.h" />
