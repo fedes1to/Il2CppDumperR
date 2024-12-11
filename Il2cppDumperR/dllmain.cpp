@@ -9,25 +9,13 @@
 #include "il2cpp/il2cpp-api-functions.h"
 #undef DO_API
 
-#include "il2cpp/il2cpp-wrapper.h"
-#include "classdump.h"
-
 HMODULE il2cppHandle;
 Il2CppDomain *il2cpp_domain;
 const Il2CppImage *il2cpp_corlib;
 nlohmann::json il2cpp_classes;
 
-bool is_class_dumped(std::string &className)
-{
-    for (const auto &classInfo : il2cpp_classes)
-    {
-        if (classInfo["full_name"] == className)
-        {
-            return true;
-        }
-    }
-    return false;
-}
+#include "il2cpp/il2cpp-wrapper.h"
+#include "classdump.h"
 
 static DWORD WINAPI MainThread(LPVOID lpReserved)
 {

@@ -1,3 +1,15 @@
+bool is_class_dumped(std::string &className)
+{
+    for (const auto &classInfo : il2cpp_classes)
+    {
+        if (classInfo["full_name"] == className)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 void dump_class(Il2CppClass *klass, void *userData)
 {
     if (klass)
