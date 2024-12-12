@@ -59,8 +59,35 @@ static DWORD WINAPI MainThread(LPVOID lpReserved)
 
     std::cout << "Created JSON file at the game's folder." << std::endl;
 
-    // Get s_StringLiteralTable from GameAssembly.dll using InitializeStringLiteralTable
-    auto targetString_ptr = sigz::scan_image_first("GameAssembly.dll", sigz::make_sig<sigz::ida>("E8 ? ? ? ? 48 89 05 ? ? ? ? 48 83 C4 28 C3 CC CC CC"));
+    /*
+        // Get s_StringLiteralTable from GameAssembly.dll using InitializeStringLiteralTable
+        auto result = sigz::scan_image_first("GameAssembly.dll", sigz::make_sig<sigz::ida>("48 83 EC 28 48 8B 05 ? ? ? ? 33 D2"));
+
+        if (result.has_value())
+        {
+            std::cout << "Found InitializeStringLiteralTable at: " << std::hex << result.value() << std::endl;
+            uintptr_t initializeStringLiteralTableAddr = (uintptr_t)result.value() + 0x1A;
+
+            // Extract the offset from the instruction
+            int32_t offset = *(int32_t*)(initializeStringLiteralTableAddr + 3);
+
+            // Calculate the absolute address
+            uintptr_t s_StringLiteralTableAddr = initializeStringLiteralTableAddr + 7 + offset;
+            Il2CppString** s_StringLiteralTable = (Il2CppString**)s_StringLiteralTableAddr;
+
+            for (int i = 0; i < 10000; i++) // 10000 is just a random number
+            {
+                Il2CppString* stringInstance = s_StringLiteralTable[i];
+                uintptr_t stringAddr = (uintptr_t)stringInstance;
+                if (stringAddr > (uintptr_t)il2cppHandle && stringAddr < 1000000000000000)
+                    std::cout << "s_StringLiteralTable[" << i << "]: " << stringAddr << ", value: " << stringInstance->getString() << std::endl;
+            }
+        }
+        else
+        {
+            std::cerr << "Failed to find InitializeStringLiteralTable" << std::endl;
+        }
+    */
 
     il2cpp_thread_detach(il2cpp_thread_current());
 

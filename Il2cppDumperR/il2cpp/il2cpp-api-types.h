@@ -6,6 +6,7 @@
 #if !defined(__cplusplus)
 #define bool uint8_t
 #endif // !__cplusplus
+#include <codecvt>
 
 typedef struct Il2CppClass Il2CppClass;
 typedef struct Il2CppType Il2CppType;
@@ -198,3 +199,30 @@ typedef uint8_t (*Il2CppAndroidUpStateFunc)(const char* ifName, uint8_t* is_up);
 typedef struct MethodInfo {
     Il2CppMethodPointer methodPointer;
 } MethodInfo;
+
+typedef struct MonitorData;
+typedef Il2CppClass Il2CppVTable;
+typedef struct Il2CppObject
+{
+    union
+    {
+        Il2CppClass* klass;
+        Il2CppVTable* vtable;
+    };
+    MonitorData* monitor;
+} Il2CppObject;
+
+// System.String
+typedef struct Il2CppString
+{
+    Il2CppObject object;
+    int32_t length;                             ///< Length of string *excluding* the trailing null (which is included in 'chars').
+    Il2CppChar chars[0];
+    std::string getString() const {
+        // Convert wchar_t to UTF-8 using Windows API
+        int size_needed = WideCharToMultiByte(CP_UTF8, 0, chars, length, nullptr, 0, nullptr, nullptr);
+        std::string u8_conv(size_needed, 0);
+        WideCharToMultiByte(CP_UTF8, 0, chars, length, &u8_conv[0], size_needed, nullptr, nullptr);
+        return u8_conv;
+    }
+} Il2CppString;
