@@ -13,7 +13,8 @@
 HMODULE il2cppHandle;
 Il2CppDomain *il2cpp_domain;
 const Il2CppImage *il2cpp_corlib;
-nlohmann::json il2cpp_classes, il2cpp_strings;
+nlohmann::json il2cpp_classes;
+//nlohmann::json il2cpp_strings;
 
 #include "il2cpp/il2cpp-wrapper.h"
 #include "classdump.h"
@@ -50,7 +51,7 @@ static DWORD WINAPI MainThread(LPVOID lpReserved)
     std::cout << "Finished Dumping All Classes!" << std::endl;
 
     // delete the file if it already exists
-    DeleteFile(L"il2cpp_class_dump.json");
+    DeleteFile(L"il2cpp_classes.json");
 
     // write to file
     WriteFile(

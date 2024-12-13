@@ -12,5 +12,6 @@
 #include <iostream>
 #include <string>
 #include <MinHook.h>
+#include <fstream>
 
 #endif // PCH_H
