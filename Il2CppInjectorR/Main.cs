@@ -7,8 +7,9 @@ namespace Il2CppInjectorR
     {
         public static void Main(string[] args)
         {
-            //Console.WriteLine("Enter the process name of the game you want to inject.\n(Make sure it's open).");
-            string processName = "TestProj";//Console.ReadLine();
+            Console.WriteLine("Enter the process name of the game you want to inject.\n(Make sure it's open).");
+            //string processName = "TestProj";
+            string processName = Console.ReadLine();
             string assemblyPath = Directory.GetCurrentDirectory() + @"\..\Il2cppDumperR.dll";
 
             Process[] processes = Process.GetProcessesByName(processName);
