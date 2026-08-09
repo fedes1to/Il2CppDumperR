@@ -36,12 +36,21 @@ All items below are complete. See the README for usage.
 
 ## Completed extras
 
-- [x] **String xrefs** — finds the s_StringLiteralTable slot dynamically (writable slot whose
-      value == the heap table pointer), scans GameAssembly code for RIP-relative refs to it,
-      annotates methods with `string_count` / `strings` (indices) and string entries with
-      `methods`. Verified on the real game (V Rising DS: slot discovered, 7 literal-using sites,
-      method annotated). Dedicated-server builds strip most string-heavy client code from
-      IL2CPP, so counts are low there — client builds will have thousands.
+- [x] **String xrefs** — three-layer engine:
+      1. static: finds the s_StringLiteralTable slot dynamically (writable slot whose value ==
+         the heap table pointer), scans GameAssembly code for RIP-relative refs to it, annotates
+         methods with `string_count` and string entries with `methods`
+      2. encoded-token scan: finds `(5<<29)|(idx<<1)|1` immediates at instruction boundaries
+      3. live-use hook (opt-in `IL2CPP_STRING_HOOK=1`): patches the MetadataCache dispatcher
+         and records (index, return-address) pairs while the game runs — the definitive
+         per-string xref for active games
+      Verified on the real game (V Rising DS: slot discovered, 7 literal-using sites, method
+      annotated). Dedicated-server builds strip most string-heavy client code from IL2CPP, so
+      static counts are low there — client builds and the live hook give far more.
+- [x] **IDA plugin: search + usage** — `ida/il2cpp_strings.py`: loads the dumps, scans for
+      encoded tokens (resumable, with progress), search a string substring to get its literal
+      index + every referencing method, jump to the first use. `ida/il2cpp_import.py` already
+      renames methods/creates structs/imports strings.
 - [x] **Output path control** — dumps go to the game folder by default; the loader can pick a
       different output folder. Mechanism: `il2cpp_dump_dir.txt` next to the dumper module
       (works for Windows/Wine/Linux injection alike), or `IL2CPP_DUMP_DIR` env var

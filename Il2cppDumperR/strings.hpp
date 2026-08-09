@@ -27,6 +27,7 @@
 #include "state.hpp"
 #include "sigz.hpp"
 #include "log.hpp"
+#include "hook.hpp"
 #include "metadata.hpp"
 
 namespace strdump {
@@ -311,10 +312,14 @@ namespace strdump {
         il2cpp_strings = nlohmann::json::array();
         size_t from_memory = 0, from_metadata = 0;
 
-        size_t total = metadata.valid && strings_allow_metadata ? metadata.literals.size() : 0x100000;
+        // The table has exactly metadata.literals.size() entries — that's the
+        // true table size (validation use of metadata, not value fabrication),
+        // so cap the read loop to it. Without metadata, scan up to a cap.
+        size_t total = metadata.valid ? metadata.literals.size() : 0x100000;
         if (metadata.valid)
             dlog::info("string literal definitions from metadata: %zu (used for size/validation only)",
                        metadata.literals.size());
+        dlog::info("dump_strings: table=%p total=%zu", table, total);
         int invalid_run = 0;
 
         // entries are read in chunks to keep the safe_read syscall count low
@@ -650,6 +655,62 @@ namespace strdump {
         }
 
         dlog::good("string xrefs built: %zu methods reference literals", method_ref_count.size());
+    }
+
+    // Maps a runtime return address to a method label (base + rva via dump map).
+    inline std::string method_at_addr(uintptr_t addr, const method_map& mm) {
+        if (!il2cppBase || addr < reinterpret_cast<uintptr_t>(il2cppBase))
+            return "";
+        uint64_t rva = addr - reinterpret_cast<uintptr_t>(il2cppBase);
+        return mm.containing(rva);
+    }
+
+    // Annotates strings/methods from real-time literal uses captured by the
+    // hook (index + return address). This is the most accurate xref source:
+    // it reflects what the game ACTUALLY executed.
+    inline void annotate_from_live_uses(const std::vector<hook::literal_use>& uses) {
+        method_map mm;
+        mm.build(il2cpp_classes);
+
+        // count uses per (string, method)
+        std::map<std::pair<size_t, std::string>, int> counts;
+        std::map<size_t, int> per_string;
+        std::map<std::string, int> per_method;
+        for (const auto& u : uses) {
+            if (u.index >= il2cpp_strings.size())
+                continue;
+            std::string label = method_at_addr(u.ret_addr, mm);
+            std::string key = label.empty() ? ("sub_" + std::to_string(u.ret_addr - reinterpret_cast<uintptr_t>(il2cppBase))) : label;
+            counts[{u.index, key}]++;
+            per_string[u.index]++;
+            per_method[key]++;
+        }
+
+        // annotate strings
+        for (auto& [idx, cnt] : per_string) {
+            if (idx >= il2cpp_strings.size())
+                continue;
+            il2cpp_strings[idx]["use_count"] = cnt;
+            if (!il2cpp_strings[idx].contains("methods"))
+                il2cpp_strings[idx]["methods"] = nlohmann::json::array();
+        }
+        for (auto& [pr, cnt] : counts) {
+            auto [idx, label] = pr;
+            if (idx >= il2cpp_strings.size())
+                continue;
+            nlohmann::json entry = { {"method", label}, {"count", cnt} };
+            il2cpp_strings[idx]["methods"].push_back(std::move(entry));
+        }
+
+        // annotate methods
+        for (auto& [label, cnt] : per_method) {
+            auto* m = find_method(label);
+            if (m) {
+                (*m)["live_string_count"] = cnt;
+            }
+        }
+        dlog::good("live-use xrefs annotated: %zu strings used from %zu methods",
+                   per_string.size(), per_method.size());
     }
 
 }

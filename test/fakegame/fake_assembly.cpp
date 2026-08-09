@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <initializer_list>
 
 #if defined(_WIN32)
 #define EXPORT extern "C" __declspec(dllexport)
@@ -139,6 +140,48 @@ static void init_strings() {
 // the dumper's heuristic scan finds the table through it.
 EXPORT void* fake_touch_strings() {
     return s_StringLiteralTable[0];
+}
+
+// ---------------------------------------------------------------------------
+// Fake literal dispatcher (mimics il2cpp MetadataCache::GetStringLiteral):
+// takes an encoded token (type<<29 | idx<<1 | 1), type 5 = string literal.
+// The dumper's hook targets this function's prologue.
+// ---------------------------------------------------------------------------
+
+static int g_fake_dispatch_calls = 0;
+
+// The dispatcher's prologue must be exactly 5 clean bytes for the hook to
+// steal them (push rdi; sub rsp,20h — same as real il2cpp). Implemented as
+// a naked wrapper that jumps to the C++ body after the standard prologue.
+extern "C" void* fake_literal_dispatcher(unsigned int token) __attribute__((naked));
+extern "C" void* fake_literal_dispatcher_body(unsigned int token);
+extern "C" void* fake_literal_dispatcher(unsigned int token) {
+    __asm__ volatile(
+        "push %rdi\n\t"          // 57
+        "sub $0x20, %rsp\n\t"    // 48 83 EC 20
+        "call fake_literal_dispatcher_body\n\t"
+        "add $0x20, %rsp\n\t"
+        "pop %rdi\n\t"
+        "ret\n\t"
+    );
+}
+extern "C" void* fake_literal_dispatcher_body(unsigned int token) {
+    unsigned int type = token >> 29;
+    unsigned int idx = (token >> 1) & 0xFFFFFFF;
+    ++g_fake_dispatch_calls;
+    std::printf("DISPATCH body: token=0x%x calls=%d this=%p\n", token, g_fake_dispatch_calls, (void*)&fake_literal_dispatcher_body);
+    std::fflush(stdout);
+    if (type == 5 && idx < 8)
+        return s_StringLiteralTable[idx];
+    return nullptr;
+}
+
+EXPORT void fake_use_literals() {
+    // exercise a few literal indices through the dispatcher
+    for (unsigned int idx : {0u, 1u, 4u, 7u}) {
+        unsigned int token = (5u << 29) | (idx << 1) | 1u;
+        fake_literal_dispatcher(token);
+    }
 }
 
 // ---------------------------------------------------------------------------

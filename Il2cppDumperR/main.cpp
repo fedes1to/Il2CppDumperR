@@ -26,6 +26,7 @@
 #include "resolve.hpp"
 #include "classdump.h"
 #include "strings.hpp"
+#include "hook.hpp"
 
 // ---------------------------------------------------------------------------
 // Unity / metadata version detection
@@ -133,6 +134,15 @@ static void dump_worker(void* module_handle) {
         if (il2cpp_thread_attach)
             il2cpp_thread_attach(il2cpp_domain); // attach to game
 
+        // install the literal-use hook (opt-in: IL2CPP_STRING_HOOK=1). The
+        // static xref scan works without it; the hook captures live (index,
+        // return-address) uses while the game runs, for active games. Off by
+        // default since it patches game code.
+        const char* hook_env = std::getenv("IL2CPP_STRING_HOOK");
+        bool want_hook = hook_env && *hook_env == '1';
+        if (want_hook)
+            hook::install();
+
         // dump the game (funky method im aware)
         dlog::info("dumping classes...");
         il2cpp_class_for_each(dump_class, nullptr);
@@ -143,6 +153,14 @@ static void dump_worker(void* module_handle) {
 
         // string <-> method xrefs (requires the classes dump + table)
         strdump::build_string_xrefs(il2cpp_metadata, strdump::g_found_table);
+
+        // real-time literal uses captured by the hook (index + return addr)
+        hook::uninstall();
+        std::vector<hook::literal_use> uses;
+        hook::take_uses(uses);
+        dlog::info("captured %zu real-time literal uses", uses.size());
+        if (!uses.empty())
+            strdump::annotate_from_live_uses(uses);
 
         // write the class dump AFTER xrefs so method annotations land on disk
         const std::string dir = dump_dir;
