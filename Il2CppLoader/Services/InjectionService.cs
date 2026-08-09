@@ -64,8 +64,27 @@ public static class InjectionService
     // injection
     // -----------------------------------------------------------------
 
+    /// <summary>
+    /// Writes il2cpp_dump_dir.txt next to the dumper library. The dumper reads
+    /// this file on init (it's in its own module dir, so it works for
+    /// Windows/Wine/Linux injection alike) and writes the dumps there.
+    /// </summary>
+    public static string? WriteDumpDirConfig(string dumperPath, string? outputDir)
+    {
+        if (string.IsNullOrWhiteSpace(outputDir))
+            return null;
+        try
+        {
+            string dir = Path.GetDirectoryName(Path.GetFullPath(dumperPath)) ?? ".";
+            string cfg = Path.Combine(dir, "il2cpp_dump_dir.txt");
+            File.WriteAllText(cfg, outputDir);
+            return cfg;
+        }
+        catch { return null; }
+    }
+
     public static async Task<bool> InjectAsync(
-        GameInfo game, int? pid, string dumperPath, Action<string> log, CancellationToken ct)
+        GameInfo game, int? pid, string dumperPath, Action<string> log, CancellationToken ct, string? outputDir = null)
     {
         bool isLinuxHost = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
 
@@ -83,7 +102,7 @@ public static class InjectionService
     }
 
     /// <summary>Launches a native Linux game with the dumper preloaded.</summary>
-    public static Process? LaunchWithPreload(GameInfo game, string soPath, Action<string> log)
+    public static Process? LaunchWithPreload(GameInfo game, string soPath, Action<string> log, string? outputDir = null)
     {
         var psi = new ProcessStartInfo
         {
@@ -92,6 +111,8 @@ public static class InjectionService
             UseShellExecute = false,
         };
         psi.Environment["LD_PRELOAD"] = soPath;
+        if (!string.IsNullOrWhiteSpace(outputDir))
+            psi.Environment["IL2CPP_DUMP_DIR"] = outputDir;
         log($"launching with LD_PRELOAD={soPath}");
         return Process.Start(psi);
     }
@@ -124,6 +145,7 @@ public static class InjectionService
                 CloseHandle(proc);
                 return false;
             }
+
             IntPtr loadLib = GetProcAddress(GetModuleHandle("kernel32.dll"), "LoadLibraryW");
             IntPtr thread = CreateRemoteThread(proc, IntPtr.Zero, 0, loadLib, mem, 0, IntPtr.Zero);
             if (thread == IntPtr.Zero)

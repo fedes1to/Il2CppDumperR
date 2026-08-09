@@ -6,11 +6,14 @@ Injects into a running game and writes JSON dumps next to the game executable:
 
 - **`il2cpp_classes.json`** — every class with fields (+offsets), methods (+RVA into
   GameAssembly), properties, tokens, sizes and flags
-- **`il2cpp_strings.json`** — every string literal, read from live memory
-  (`source: "memory"`), with lazily-uninitialized literals filled in from
-  `global-metadata.dat` (`source: "metadata"`). String xrefs are also built:
-  methods that reference literals get `string_count` / `strings` (literal
-  indices), and string entries get `methods` (the methods that use them).
+- **`il2cpp_strings.json`** — every string literal, read **from live memory**
+  (`source: "memory"`). By default the dumper is memory-only: `global-metadata.dat`
+  is used solely to validate the found table and know its size, never to
+  fabricate values. Set `IL2CPP_STRINGS_ALLOW_METADATA=1` to also fill
+  lazily-uncreated literals from the metadata blob (`source: "metadata"`).
+  String xrefs are also built: methods that reference literals get
+  `string_count` / `strings` (literal indices), and string entries get
+  `methods` (the methods that use them).
 
 Works across Unity versions (metadata versions 24–31+, Unity 5.6 → 2022.2+ era):
 every il2cpp export is resolved independently and the dump degrades gracefully
@@ -53,8 +56,12 @@ The dumper also builds on Windows with MSVC through CMake
 Run `Il2CppLoader`, pick the running game (Wine processes are resolved
 automatically, including the right `WINEPREFIX`) or browse to the game
 executable. It auto-detects platform / scripting backend / Unity version /
-metadata version, then **Inject & Dump**. Watch progress in the log panel;
-output lands in the game folder.
+metadata version, then **Inject & Dump**. Watch progress in the log panel.
+
+Output goes to the game folder by default; set the **Output folder** box to
+write elsewhere (the loader drops an `il2cpp_dump_dir.txt` next to the dumper,
+which the dumper reads on startup — so it works identically on Windows, Wine
+and native Linux).
 
 ### Manual
 

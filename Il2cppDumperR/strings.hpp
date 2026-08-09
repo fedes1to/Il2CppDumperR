@@ -23,12 +23,29 @@
 #include <optional>
 #include <map>
 #include <unordered_map>
+#include <cstdlib>
 #include "state.hpp"
 #include "sigz.hpp"
 #include "log.hpp"
 #include "metadata.hpp"
 
 namespace strdump {
+
+    // MEMORY-ONLY by default: the string literal table is read from process
+    // memory. Metadata (global-metadata.dat) is used ONLY to validate the
+    // found table and to know its size — never to fabricate string values.
+    // Set IL2CPP_STRINGS_ALLOW_METADATA=1 to fill lazily-uncreated literals
+    // from the metadata blob.
+    inline const bool strings_allow_metadata = []() {
+        const char* env = std::getenv("IL2CPP_STRINGS_ALLOW_METADATA");
+        if (env && *env == '1')
+            return true;
+#ifdef IL2CPP_STRINGS_ALLOW_METADATA
+        return true;
+#else
+        return false;
+#endif
+    }();
 
     struct table_sig {
         const char* platform;   // "windows", "linux", or "any"
@@ -285,29 +302,19 @@ namespace strdump {
     inline void dump_strings(const meta::MetadataInfo& metadata) {
         void* table = find_string_table(metadata);
         if (!table) {
-            if (metadata.valid) {
-                // table not found (or never allocated because all literals are
-                // lazy) — still deliver every literal from the metadata blob
-                dlog::warn("could not locate the string literal table; dumping %zu literals from metadata",
-                           metadata.literals.size());
-                il2cpp_strings = nlohmann::json::array();
-                for (size_t i = 0; i < il2cpp_metadata.literals.size(); ++i) {
-                    nlohmann::json jentry;
-                    jentry["index"] = i;
-                    jentry["value"] = il2cpp_metadata.literals[i];
-                    jentry["source"] = "metadata";
-                    il2cpp_strings.push_back(std::move(jentry));
-                }
-            } else {
-                dlog::error("could not locate the string literal table");
-            }
+            // table not found — memory-only mode has nothing to read
+            dlog::error("could not locate the string literal table in memory");
+            il2cpp_strings = nlohmann::json::array();
             return;
         }
 
         il2cpp_strings = nlohmann::json::array();
         size_t from_memory = 0, from_metadata = 0;
 
-        size_t total = metadata.valid ? metadata.literals.size() : 0x100000;
+        size_t total = metadata.valid && strings_allow_metadata ? metadata.literals.size() : 0x100000;
+        if (metadata.valid)
+            dlog::info("string literal definitions from metadata: %zu (used for size/validation only)",
+                       metadata.literals.size());
         int invalid_run = 0;
 
         // entries are read in chunks to keep the safe_read syscall count low
@@ -316,9 +323,7 @@ namespace strdump {
         for (size_t base = 0; base < total; base += kChunk) {
             size_t n = std::min(kChunk, total - base);
             if (!plat::safe_read(static_cast<void* const*>(table) + base, entries.data(), n * sizeof(void*))) {
-                if (metadata.valid)
-                    break; // table unreadable past this point
-                // metadata-less mode: a failed read may just be a page gap
+                // a failed read may just be a page gap; try entry-by-entry
                 for (size_t k = 0; k < n; ++k)
                     entries[k] = table_entry(table, base + k);
             }
@@ -327,16 +332,6 @@ namespace strdump {
                 size_t i = base + k;
                 void* entry = entries[k];
             if (!entry) {
-                if (metadata.valid) {
-                    // not created in memory (yet) — fall back to the metadata blob
-                    nlohmann::json jentry;
-                    jentry["index"] = i;
-                    jentry["value"] = metadata.literals[i];
-                    jentry["source"] = "metadata";
-                    il2cpp_strings.push_back(std::move(jentry));
-                    ++from_metadata;
-                    continue;
-                }
                 if (++invalid_run > 512)
                     break;
                 continue;
@@ -353,7 +348,9 @@ namespace strdump {
                     jentry["rva"] = addr - reinterpret_cast<uintptr_t>(il2cppBase);
                 il2cpp_strings.push_back(std::move(jentry));
                 ++from_memory;
-            } else if (metadata.valid) {
+            } else if (strings_allow_metadata && metadata.valid) {
+                // not a valid in-memory string; only when explicitly enabled,
+                // fall back to the metadata blob
                 nlohmann::json jentry;
                 jentry["index"] = i;
                 jentry["value"] = metadata.literals[i];
@@ -363,8 +360,9 @@ namespace strdump {
             }
             }
         }
-        dlog::good("dumped %zu string literals (%zu from memory, %zu filled from metadata)",
-                   from_memory + from_metadata, from_memory, from_metadata);
+        dlog::good("dumped %zu string literals from memory%s",
+                   from_memory,
+                   from_metadata ? (" + " + std::to_string(from_metadata) + " from metadata").c_str() : "");
     }
 
     // ---------------------------------------------------------------------

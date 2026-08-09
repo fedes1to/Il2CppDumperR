@@ -140,6 +140,35 @@ namespace plat {
 #endif
     }
 
+#ifdef _WIN32
+    // Converts a UTF-16 windows string to UTF-8.
+    inline std::string wide_to_utf8(const wchar_t* w) {
+        std::string out;
+        for (; *w; ++w) {
+            uint32_t cp = static_cast<uint32_t>(*w);
+            if (cp >= 0xD800 && cp <= 0xDBFF && w[1] >= 0xDC00 && w[1] <= 0xDFFF) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (static_cast<uint32_t>(w[1]) - 0xDC00);
+                ++w;
+            }
+            if (cp < 0x80) out.push_back(static_cast<char>(cp));
+            else if (cp < 0x800) {
+                out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+            } else if (cp < 0x10000) {
+                out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+                out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+            } else {
+                out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+                out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+                out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+            }
+        }
+        return out;
+    }
+#endif
+
     // Opens a console window for logging (no-op on Linux, stdout is already there).
     inline void open_console() {
 #ifdef _WIN32

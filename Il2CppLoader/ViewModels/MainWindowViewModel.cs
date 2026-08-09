@@ -43,6 +43,9 @@ public partial class MainWindowViewModel : ObservableObject
     private string _dumperPathOverride = "";
 
     [ObservableProperty]
+    private string _outputFolder = "";
+
+    [ObservableProperty]
     private GameInfo? _game;
 
     [ObservableProperty]
@@ -149,15 +152,21 @@ public partial class MainWindowViewModel : ObservableObject
             }
             AppendLog($"dumper: {dumper}");
 
+            // output folder: UI-chosen, else the game folder
+            string outDir = string.IsNullOrWhiteSpace(OutputFolder) ? Game.GameDir : OutputFolder;
+            AppendLog($"output folder: {outDir}");
+            // the dumper reads il2cpp_dump_dir.txt from its own module dir
+            InjectionService.WriteDumpDirConfig(dumper, outDir);
+
             // remove previous output so we can watch for fresh files
-            foreach (var f in new[] { Game.DumpPath, Game.StringsPath, Game.LogPath })
+            foreach (var f in new[] { Path.Combine(outDir, "il2cpp_classes.json"), Path.Combine(outDir, "il2cpp_strings.json"), Path.Combine(outDir, "il2cpp_dumper.log") })
                 try { File.Delete(f); } catch { }
 
             int? pid = SelectedProcess?.Pid;
             if (pid.HasValue && !string.Equals(SelectedProcess!.Path, Game.ExePath, StringComparison.OrdinalIgnoreCase))
                 pid = null; // stale selection
 
-            bool ok = await InjectionService.InjectAsync(Game, pid, dumper, AppendLog, ct);
+            bool ok = await InjectionService.InjectAsync(Game, pid, dumper, AppendLog, ct, outDir);
             if (!ok)
             {
                 AppendLog("injection failed");
@@ -167,7 +176,7 @@ public partial class MainWindowViewModel : ObservableObject
 
             AppendLog("injected, waiting for the dump...");
             StatusText = "dumping...";
-            await WatchDump(Game, ct);
+            await WatchDump(Game, outDir, ct);
         }
         finally
         {
@@ -189,25 +198,43 @@ public partial class MainWindowViewModel : ObservableObject
             AppendLog("libIl2cppDumperR.so not found — build it (build.sh) or set the path override");
             return;
         }
-        foreach (var f in new[] { Game.DumpPath, Game.StringsPath, Game.LogPath })
+        string outDir = string.IsNullOrWhiteSpace(OutputFolder) ? Game.GameDir : OutputFolder;
+        foreach (var f in new[] { Path.Combine(outDir, "il2cpp_classes.json"), Path.Combine(outDir, "il2cpp_strings.json"), Path.Combine(outDir, "il2cpp_dumper.log") })
             try { File.Delete(f); } catch { }
-        InjectionService.LaunchWithPreload(Game, dumper, AppendLog);
+        InjectionService.LaunchWithPreload(Game, dumper, AppendLog, outDir);
         StatusText = "game launched, dumping...";
         _watchCts?.Cancel();
         _watchCts = new CancellationTokenSource();
-        await WatchDump(Game, _watchCts.Token);
+        await WatchDump(Game, outDir, _watchCts.Token);
+    }
+
+    [RelayCommand]
+    private async Task BrowseOutputFolder()
+    {
+        var window = _desktop.MainWindow;
+        if (window == null)
+            return;
+        var dirs = await window.StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = "Select output folder for the dump",
+            AllowMultiple = false,
+        });
+        var dir = dirs.FirstOrDefault();
+        if (dir?.TryGetLocalPath() is string path)
+            OutputFolder = path;
     }
 
     [RelayCommand]
     private void OpenOutputFolder()
     {
-        if (Game == null)
+        string outDir = string.IsNullOrWhiteSpace(OutputFolder) ? Game?.GameDir ?? "" : OutputFolder;
+        if (string.IsNullOrEmpty(outDir))
             return;
         try
         {
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
-                FileName = Game.GameDir,
+                FileName = outDir,
                 UseShellExecute = true,
             });
         }
@@ -219,23 +246,26 @@ public partial class MainWindowViewModel : ObservableObject
 
     // ---------------- dump watching ----------------
 
-    private async Task WatchDump(GameInfo game, CancellationToken ct)
+    private async Task WatchDump(GameInfo game, string outDir, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow.AddMinutes(10);
         long lastLogSize = 0;
         bool done = false;
+        string logPath = Path.Combine(outDir, "il2cpp_dumper.log");
+        string dumpPath = Path.Combine(outDir, "il2cpp_classes.json");
+        string stringsPath = Path.Combine(outDir, "il2cpp_strings.json");
 
         while (!ct.IsCancellationRequested && DateTime.UtcNow < deadline)
         {
             // mirror the dumper log
             try
             {
-                if (File.Exists(game.LogPath))
+                if (File.Exists(logPath))
                 {
-                    var fi = new FileInfo(game.LogPath);
+                    var fi = new FileInfo(logPath);
                     if (fi.Length > lastLogSize)
                     {
-                        using var fs = new FileStream(game.LogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                        using var fs = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
                         fs.Seek(lastLogSize, SeekOrigin.Begin);
                         using var sr = new StreamReader(fs);
                         AppendLog((await sr.ReadToEndAsync(ct)).TrimEnd());
@@ -247,7 +277,7 @@ public partial class MainWindowViewModel : ObservableObject
             }
             catch { }
 
-            if (done || (File.Exists(game.DumpPath) && LogText.Contains("wrote")))
+            if (done || (File.Exists(dumpPath) && LogText.Contains("wrote")))
             {
                 // give the strings file a moment to land too
                 await Task.Delay(1500, ct);
@@ -256,14 +286,14 @@ public partial class MainWindowViewModel : ObservableObject
             await Task.Delay(500, ct);
         }
 
-        if (File.Exists(game.DumpPath))
+        if (File.Exists(dumpPath))
         {
-            var size = new FileInfo(game.DumpPath).Length;
-            string strings = File.Exists(game.StringsPath)
-                ? $", strings {new FileInfo(game.StringsPath).Length / 1024} KB"
+            var size = new FileInfo(dumpPath).Length;
+            string strings = File.Exists(stringsPath)
+                ? $", strings {new FileInfo(stringsPath).Length / 1024} KB"
                 : "";
             StatusText = $"dump complete ({size / 1024 / 1024} MB classes{strings})";
-            AppendLog($"dump at: {game.DumpPath}");
+            AppendLog($"dump at: {dumpPath}");
         }
         else
         {

@@ -87,6 +87,11 @@
             <StackPanel>
               <TextBlock Text="Dumper library (leave empty for auto-detect)" FontWeight="SemiBold" Margin="0,0,0,6"/>
               <TextBox Text="{Binding DumperPathOverride}" Watermark="Il2cppDumperR.dll / libIl2cppDumperR.so"/>
+              <TextBlock Text="Output folder (leave empty = game folder)" FontWeight="SemiBold" Margin="0,10,0,6"/>
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBox Text="{Binding OutputFolder}" Watermark="where to write il2cpp_classes.json / il2cpp_strings.json" Grid.Column="0"/>
+                <Button Content="Browse..." Command="{Binding BrowseOutputFolderCommand}" Grid.Column="1" Margin="6,0,0,0"/>
+              </Grid>
             </StackPanel>
           </Border>
 

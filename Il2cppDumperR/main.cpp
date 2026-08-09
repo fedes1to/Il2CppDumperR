@@ -4,6 +4,7 @@
 //   * Il2cppDumperR.dll  (Windows / Wine, inject into the game process)
 //   * libIl2cppDumperR.so (native Linux, LD_PRELOAD or dlopen-inject)
 
+#include <cstdlib>
 #include <fstream>
 #include <string>
 
@@ -53,6 +54,52 @@ static void dump_worker(void* module_handle) {
     il2cppBase = plat::module_base(plat::game_assembly_module_name());
     dlog::good("found %s @ %p", plat::game_assembly_module_name(), il2cppBase);
 
+    // output directory: IL2CPP_DUMP_DIR env override, else a config file next
+    // to this module (written by the loader), else the game folder.
+    std::string dump_dir;
+    auto read_dump_dir = [&]() -> std::string {
+        if (const char* env = std::getenv("IL2CPP_DUMP_DIR"); env && *env)
+            return env;
+#ifdef _WIN32
+        wchar_t mod[MAX_PATH];
+        // the config lives next to THIS dll, not next to the game exe.
+        // GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS always finds our own module
+        // regardless of how the loader named it.
+        HMODULE self = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(&dump_worker), &self) &&
+            GetModuleFileNameW(self, mod, MAX_PATH)) {
+            std::string dir = plat::wide_to_utf8(mod);
+            dir = dir.substr(0, dir.find_last_of("\\/"));
+            std::ifstream f(dir + "\\il2cpp_dump_dir.txt");
+            std::string line;
+            if (f && std::getline(f, line) && !line.empty()) {
+                line.erase(line.find_last_not_of(" \t\r\n") + 1);
+                return line;
+            }
+        }
+#else
+        Dl_info info;
+        if (dladdr((void*)&dump_worker, &info) && info.dli_fname) {
+            std::string dir = info.dli_fname;
+            dir = dir.substr(0, dir.find_last_of('/'));
+            std::ifstream f(dir + "/il2cpp_dump_dir.txt");
+            std::string line;
+            if (f && std::getline(f, line) && !line.empty()) {
+                line.erase(line.find_last_not_of(" \t\r\n") + 1);
+                return line;
+            }
+        }
+#endif
+        return "";
+    };
+    dump_dir = read_dump_dir();
+    if (dump_dir.empty())
+        dump_dir = plat::executable_dir();
+    else
+        dlog::info("dump output dir: %s", dump_dir.c_str());
+
     // Resolve the il2cpp API (exports first, signature fallback for
     // obfuscated/stripped GameAssembly builds).
     il2cpp_fallback_resolver = &resolve::resolve_by_signature;
@@ -98,7 +145,7 @@ static void dump_worker(void* module_handle) {
         strdump::build_string_xrefs(il2cpp_metadata, strdump::g_found_table);
 
         // write the class dump AFTER xrefs so method annotations land on disk
-        const std::string dir = plat::executable_dir();
+        const std::string dir = dump_dir;
         try {
             std::ofstream out(dir + "/il2cpp_classes.json", std::ios::trunc);
             out << il2cpp_classes.dump(4);

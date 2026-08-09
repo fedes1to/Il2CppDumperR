@@ -4,8 +4,12 @@
 // Used for:
 //   * il2cpp metadata version detection (multi-version support)
 //   * string literal definitions: the exact literal count + expected values,
-//     which lets the string-table scanner validate candidates deterministically
-//     and fill in literals that il2cpp hasn't lazily created in memory yet.
+//     which lets the string-table scanner validate candidates deterministically.
+//
+// NOTE: by default the dumper is MEMORY-ONLY for strings — the literal blob is
+// used only to VALIDATE the in-memory table and to know the table size, never
+// to fill in values from disk. Set IL2CPP_STRINGS_ALLOW_METADATA=1 (or build
+// with IL2CPP_STRINGS_ALLOW_METADATA defined) to enable the metadata fallback.
 //
 // Header layout (stable from v24 through v31+):
 //   0x00 u32 sanity (0xFAB11BAF)
