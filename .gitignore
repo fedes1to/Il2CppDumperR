@@ -1,4 +1,7 @@
+# --- build output ---------------------------------------------------------
 build/
+
+# --- .NET -----------------------------------------------------------------
 bin/
 obj/
 *.user
@@ -7,6 +10,41 @@ Il2CppLoader/bin/
 Il2CppLoader/obj/
 test/Il2CppLoader.CliTest/bin/
 test/Il2CppLoader.CliTest/obj/
+
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.pyc
+
+# --- binaries copied to repo root for quick tests -------------------------
+*.exe
+*.dll
+*.so
+*.a
+
+# --- dumper/loader runtime artifacts --------------------------------------
+# dumps produced by Il2CppDumperR (written next to the game or chosen dir)
+il2cpp_classes.json
+il2cpp_strings.json
+il2cpp_live_uses.jsonl
+il2cpp_dumper.log
+
+# loader/dumper config files (written next to the module)
+il2cpp_dump_dir.txt
+il2cpp_string_hook.txt
+
+# --- test scratch ---------------------------------------------------------
+test/fake-run/
+test/fake-run-win/
+*.log
+
+# --- IDE / OS -------------------------------------------------------------
+.vs/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# --- downloaded/leftover test games ---------------------------------------
 steamcmd/
 CrabGame/
 Muck/
