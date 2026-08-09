@@ -66,16 +66,25 @@ TYPE_SIZES = {
 }
 
 
+def _ff(name: str):
+    """Resolve a type flag across IDA versions (idc.FF_* in 7/8, ida_bytes in 9)."""
+    for mod in (idc, ida_bytes):
+        v = getattr(mod, name, None)
+        if v is not None:
+            return v
+    return 0
+
+
 def flag_for_size(size: int):
     if size == 1:
-        return idc.FF_BYTE, 1
+        return _ff("FF_BYTE"), 1
     if size == 2:
-        return idc.FF_WORD, 2
+        return _ff("FF_WORD"), 2
     if size == 4:
-        return idc.FF_DWRD, 4
+        return _ff("FF_DWRD") or _ff("FF_DWORD"), 4
     if size >= 8:
-        return idc.FF_QWRD, 8
-    return idc.FF_BYTE, size
+        return _ff("FF_QWRD") or _ff("FF_QWORD"), 8
+    return _ff("FF_BYTE"), size
 
 
 def get_segm_by_name(name: str) -> int:
@@ -92,6 +101,24 @@ def get_segm_by_name(name: str) -> int:
 # ---------------------------------------------------------------------------
 # classes
 # ---------------------------------------------------------------------------
+
+# string index -> value (loaded from il2cpp_strings.json, used to annotate
+# methods with the literals they reference)
+STRINGS_BY_INDEX = {}
+STRINGS_LOADED = False
+
+
+def load_strings_by_index(path: str) -> None:
+    global STRINGS_BY_INDEX, STRINGS_LOADED
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            strings = json.load(f)
+        STRINGS_BY_INDEX = {s.get("index"): s.get("value", "") for s in strings}
+        STRINGS_LOADED = True
+        print(f"[il2cpp] loaded {len(STRINGS_BY_INDEX)} strings for method annotations")
+    except Exception as e:
+        print(f"[il2cpp] could not load strings for annotations: {e}")
+
 
 def make_struct(full_name: str, fields: list) -> None:
     sid = idc.add_struc(-1, sanitize(full_name), 0)
@@ -154,8 +181,21 @@ def import_classes(path: str) -> None:
                             for p in plist) + ")")
                     if method.get("token"):
                         parts.append(f"token 0x{method['token']:08x}")
+
+                    # strings used by this method (from the dump's xref data)
+                    str_indices = method.get("strings") or []
+                    if str_indices:
+                        str_list = []
+                        for si in str_indices:
+                            val = STRINGS_BY_INDEX.get(si, f"<#{si}>")
+                            val_disp = val[:60].replace("\n", "\\n") if val else ""
+                            str_list.append(f"#{si}: {val_disp!r}" if val else f"#{si}")
+                        parts.append("strings: " + " | ".join(str_list[:20]))
+                    elif method.get("string_count"):
+                        parts.append(f"uses {method['string_count']} string literals (indices not in dump)")
+
                     if parts:
-                        idc.set_func_cmt(ea, "  ".join(parts), True)
+                        idc.set_func_cmt(ea, "  \n".join(parts), True)
                         n_comments += 1
 
         print(f"[il2cpp] done image {image_name}: {n_funcs} methods so far")
@@ -202,12 +242,16 @@ def import_strings(path: str) -> None:
     n = 0
     for entry in strings:
         value = entry.get("value", "")
+        if not value:
+            continue  # empty literal: nothing to import
         raw = value.encode("utf-8") + b"\x00"
         if ea + len(raw) >= idc.get_segm_end(ea):
             print(f"[il2cpp] string segment full at {n} strings")
             break
         ida_bytes.put_bytes(ea, raw)
-        idc.create_strlit(ea, len(raw))
+        # explicit strtype=0 (C string): idc.create_strlit may pass a bad
+        # INF_STRTYPE value on some IDB, causing an OverflowError in IDA 9
+        ida_bytes.create_strlit(ea, len(raw) - 1, 0)  # exclude the null terminator
         set_name_forced(ea, f"sl_{entry.get('index', n)}")
         # keep the literal index visible
         idc.set_cmt(ea, f"il2cpp string literal #{entry.get('index', n)}"
@@ -226,14 +270,19 @@ def main() -> None:
     classes_path = idaapi.ask_file(False, "il2cpp_classes.json", "Select il2cpp_classes.json")
     if not classes_path:
         return
+
+    # load strings first so method comments can show the literals they use
+    strings_path = idaapi.ask_file(False, "il2cpp_strings.json", "Select il2cpp_strings.json (cancel to skip)")
+    if strings_path:
+        load_strings_by_index(strings_path)
+
     import_classes(classes_path)
 
-    strings_path = idaapi.ask_file(False, "il2cpp_strings.json | il2cpp_strings.json",
-                                   "Select il2cpp_strings.json (cancel to skip)")
     if strings_path:
         import_strings(strings_path)
 
     print("[il2cpp] import complete")
 
 
-main()
+if __name__ == "__main__":
+    main()
