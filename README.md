@@ -8,7 +8,9 @@ Injects into a running game and writes JSON dumps next to the game executable:
   GameAssembly), properties, tokens, sizes and flags
 - **`il2cpp_strings.json`** — every string literal, read from live memory
   (`source: "memory"`), with lazily-uninitialized literals filled in from
-  `global-metadata.dat` (`source: "metadata"`)
+  `global-metadata.dat` (`source: "metadata"`). String xrefs are also built:
+  methods that reference literals get `string_count` / `strings` (literal
+  indices), and string entries get `methods` (the methods that use them).
 
 Works across Unity versions (metadata versions 24–31+, Unity 5.6 → 2022.2+ era):
 every il2cpp export is resolved independently and the dump degrades gracefully
