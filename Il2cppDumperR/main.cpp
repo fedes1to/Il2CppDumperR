@@ -174,6 +174,24 @@ static void dump_worker(void* module_handle) {
         if (want_hook) {
             dlog::info("string-use hook ENABLED (live literal capture)");
             hook::install();
+            // periodic live-use stream: write (index,ret) lines to a JSONL
+            // file next to the dumper so IDA can tail it in real time
+            // periodic live-use stream: write (index,ret) lines to a JSONL
+            // file next to the dumper so IDA can tail it in real time.
+            // The path is copied into a heap buffer passed as the thread arg
+            // (start_worker_thread takes a plain fn pointer, no captures).
+            char* dir_buf = static_cast<char*>(malloc(dump_dir.size() + 1));
+            std::memcpy(dir_buf, dump_dir.c_str(), dump_dir.size() + 1);
+            plat::start_worker_thread([](void* arg) {
+                const char* dir = static_cast<const char*>(arg);
+                std::string stream = std::string(dir) + "/il2cpp_live_uses.jsonl";
+                std::free(const_cast<char*>(dir));
+                while (hook::is_active()) {
+                    hook::drain_uses_to_jsonl(stream);
+                    plat::sleep_ms(2000);
+                }
+                hook::drain_uses_to_jsonl(stream);
+            }, dir_buf);
         }
 
         // dump the game (funky method im aware)

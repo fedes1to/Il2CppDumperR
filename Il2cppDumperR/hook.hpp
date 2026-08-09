@@ -251,6 +251,8 @@ namespace hook {
         g_hook_active = false;
     }
 
+    inline bool is_active() { return g_hook_active; }
+
     inline size_t use_count() {
         std::lock_guard<std::mutex> lk(g_hook_mutex);
         return g_literal_uses.size();
@@ -259,6 +261,30 @@ namespace hook {
     inline void take_uses(std::vector<literal_use>& out) {
         std::lock_guard<std::mutex> lk(g_hook_mutex);
         out.swap(g_literal_uses);
+    }
+
+    // Append all accumulated uses to a JSONL file (one line per use) and clear
+    // the buffer. Called periodically by the dumper's stream thread while the
+    // game runs, so an external consumer (e.g. the IDA plugin) can tail the
+    // file and see live literal usage in near-real-time.
+    inline void drain_uses_to_jsonl(const std::string& path) {
+        std::vector<literal_use> batch;
+        take_uses(batch);
+        if (batch.empty())
+            return;
+        FILE* f = std::fopen(path.c_str(), "a");
+        if (!f)
+            return;
+        char line[96];
+        for (const auto& u : batch) {
+            int n = std::snprintf(line, sizeof(line),
+                                  "{\"index\":%u,\"ret\":%llu}\n",
+                                  u.index,
+                                  (unsigned long long)u.ret_addr);
+            if (n > 0)
+                std::fwrite(line, 1, (size_t)n, f);
+        }
+        std::fclose(f);
     }
 
 }

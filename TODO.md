@@ -51,6 +51,13 @@ All items below are complete. See the README for usage.
       encoded tokens (resumable, with progress), search a string substring to get its literal
       index + every referencing method, jump to the first use. `ida/il2cpp_import.py` already
       renames methods/creates structs/imports strings.
+- [x] **IDA plugin: live-use monitor** — `ida/il2cpp_strings_plugin.py`: full `idaapi.plugin_t`
+      (Edit -> Plugins -> Il2Cpp String Search, `Ctrl+Shift+S`), a superset of the script:
+      cached StringDB (load 341MB dump + token scan once), substring/#index search, per-string
+      usage merged from dump xrefs + static token scan + live hook data (`use_count`/`methods[]`),
+      and a live-use watcher that tails `il2cpp_live_uses.jsonl` written by the dumper's hook
+      while the game runs (per-string live counts in search results, `[Nx live]` badge).
+      The dumper now also streams live uses to JSONL every 2s when the hook is active.
 - [x] **Output path control** — dumps go to the game folder by default; the loader can pick a
       different output folder. Mechanism: `il2cpp_dump_dir.txt` next to the dumper module
       (works for Windows/Wine/Linux injection alike), or `IL2CPP_DUMP_DIR` env var
