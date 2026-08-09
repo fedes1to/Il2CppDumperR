@@ -21,6 +21,8 @@
 #include <vector>
 #include <string>
 #include <optional>
+#include <map>
+#include <unordered_map>
 #include "state.hpp"
 #include "sigz.hpp"
 #include "log.hpp"
@@ -271,11 +273,13 @@ namespace strdump {
         return best;
     }
 
+    inline void* g_found_table = nullptr;
+
     inline void* find_string_table(const meta::MetadataInfo& metadata) {
-        if (auto* t = find_via_signatures(metadata))
-            return t;
+        if (auto* t = find_via_signatures(metadata)) { g_found_table = t; return t; }
         dlog::warn("signatures missed, falling back to heuristic scan (slower)");
-        return find_via_heuristic(metadata);
+        g_found_table = find_via_heuristic(metadata);
+        return g_found_table;
     }
 
     inline void dump_strings(const meta::MetadataInfo& metadata) {
@@ -361,6 +365,293 @@ namespace strdump {
         }
         dlog::good("dumped %zu string literals (%zu from memory, %zu filled from metadata)",
                    from_memory + from_metadata, from_memory, from_metadata);
+    }
+
+    // ---------------------------------------------------------------------
+    // String xrefs: find every method that references each string literal.
+    //
+    // Compiled code loads a literal with:
+    //     lea reg, [rip + disp32]          ; disp -> s_StringLiteralTable + index*8
+    //   or (older/32-bit-ish)
+    //     mov reg, [rip + disp32]
+    // and (on modern Unity) the table slot is a pointer, so the actual string is
+    // dereferenced via a second load in the same instruction stream.
+    //
+    // We recover `index` from the displacement relative to the table base and
+    // attribute the reference to the function containing the instruction
+    // (resolved from the classes dump RVA map).
+    // ---------------------------------------------------------------------
+
+    // [start, start+len) -> containing method RVA (best guess from the dump map)
+    struct method_map {
+        std::vector<std::pair<uint64_t, std::string>> ranges; // {rva_start, "ns.Class::method"}
+
+        void build(const nlohmann::json& classes) {
+            for (const auto& [image, nss] : classes.items())
+                for (const auto& [ns, clss] : nss.items())
+                    for (const auto& [cname, info] : clss.items()) {
+                        for (const auto& m : info.value("methods", nlohmann::json::array())) {
+                            if (!m.contains("offset"))
+                                continue;
+                            uint64_t off = m["offset"].get<uint64_t>();
+                            std::string label = (ns.empty() ? "" : ns + ".") + cname + "::" +
+                                                m.value("name", "?");
+                            ranges.push_back({ off, std::move(label) });
+                        }
+                    }
+            std::sort(ranges.begin(), ranges.end(),
+                      [](auto& a, auto& b) { return a.first < b.first; });
+        }
+
+        // returns the label of the method whose [start,end) window covers `rva`
+        std::string containing(uint64_t rva, uint64_t max_len = 0x40000) const {
+            auto it = std::upper_bound(ranges.begin(), ranges.end(), rva,
+                                       [](uint64_t v, auto& e) { return v < e.first; });
+            if (it == ranges.begin())
+                return "";
+            --it;
+            if (rva - it->first < max_len)
+                return it->second;
+            return "";
+        }
+    };
+
+    // Scans all executable regions of GameAssembly for RIP-relative references
+    // into [table, table + total_literals*8). Returns {rva_of_reference, index}.
+    inline std::vector<std::pair<uint64_t, size_t>> find_literal_references(
+        void* table, size_t total_literals) {
+        uintptr_t table_addr = reinterpret_cast<uintptr_t>(table);
+        uintptr_t table_end = table_addr + total_literals * sizeof(void*);
+        std::vector<std::pair<uint64_t, size_t>> refs;
+
+        for (auto& r : plat::module_regions(plat::game_assembly_module_name())) {
+            if (!r.executable)
+                continue;
+            auto* p = static_cast<unsigned char*>(r.first);
+            auto* end = static_cast<unsigned char*>(r.last);
+            for (; p + 7 <= end; ++p) {
+                if ((p[0] & 0xF8) != 0x48) // REX.W prefixed load only
+                    continue;
+                if (p[1] != 0x8B && p[1] != 0x8D) // mov/lea
+                    continue;
+                if ((p[2] & 0xC7) != 0x05)
+                    continue;
+                int32_t disp;
+                std::memcpy(&disp, p + 3, 4);
+                uintptr_t target = reinterpret_cast<uintptr_t>(p) + 7 + disp;
+                if (target < table_addr || target >= table_end)
+                    continue;
+                size_t index = (target - table_addr) / sizeof(void*);
+                uint64_t rva = reinterpret_cast<uintptr_t>(p) - reinterpret_cast<uintptr_t>(il2cppBase);
+                refs.emplace_back(rva, index);
+            }
+        }
+        return refs;
+    }
+
+    // Discovers the s_StringLiteralTable VARIABLE: a writable slot (usually in
+    // .bss/.data) whose current value equals the found heap table pointer.
+    // Modern il2cpp (2020+) allocates the table on the heap and references it
+    // through this slot, so code that loads the slot is a literal use.
+    inline void* find_table_slot(void* table) {
+        for (auto& r : plat::module_regions(plat::game_assembly_module_name())) {
+            if (r.executable)
+                continue;
+            auto* p = static_cast<unsigned char*>(r.first);
+            auto* end = static_cast<unsigned char*>(r.last);
+            for (; p + sizeof(void*) <= end; p += sizeof(void*)) {
+                void* val = nullptr;
+                if (!plat::safe_read(p, val))
+                    continue;
+                if (val == table)
+                    return p;
+            }
+        }
+        return nullptr;
+    }
+
+    // Returns RIP-relative reference RVAs to a target address (slot or table).
+    inline std::vector<uint64_t> find_rip_refs_to(void* target) {
+        uintptr_t addr = reinterpret_cast<uintptr_t>(target);
+        std::vector<uint64_t> refs;
+        for (auto& r : plat::module_regions(plat::game_assembly_module_name())) {
+            if (!r.executable)
+                continue;
+            auto* p = static_cast<unsigned char*>(r.first);
+            auto* end = static_cast<unsigned char*>(r.last);
+            for (; p + 7 <= end; ++p) {
+                // RIP-relative with ModRM mod=00 r/m=101 (REX may be absent for 32-bit ops)
+                unsigned char op = p[0];
+                bool rex = (op & 0xF0) == 0x40;
+                unsigned char modrm_idx = rex ? 2 : 1;
+                if (p + modrm_idx + 5 > end)
+                    continue;
+                unsigned char opcode = rex ? p[1] : p[0];
+                unsigned char modrm = p[modrm_idx];
+                if ((modrm & 0xC7) != 0x05) // mod=00 r/m=101
+                    continue;
+                // mov/lea/cmp/test/inc all fine — any memory operand against the slot
+                if (opcode != 0x8B && opcode != 0x8D && opcode != 0x8A && opcode != 0x89 &&
+                    opcode != 0x3B && opcode != 0x39 && opcode != 0x85 && opcode != 0xFF &&
+                    opcode != 0x83 && opcode != 0xC7) // cmp r/m,imm8 ; mov r/m,imm32
+                    continue;
+                int32_t disp;
+                std::memcpy(&disp, p + modrm_idx + 1, 4);
+                uintptr_t tgt = reinterpret_cast<uintptr_t>(p) + modrm_idx + 5 + disp;
+                if (tgt != addr)
+                    continue;
+                uint64_t rva = reinterpret_cast<uintptr_t>(p) - reinterpret_cast<uintptr_t>(il2cppBase);
+                refs.push_back(rva);
+            }
+        }
+        return refs;
+    }
+
+    // Looks backward from a slot-reference rva for a `mov reg, imm32` that
+    // loads the literal index right before the reference. Returns SIZE_MAX if
+    // no immediate index is found.
+    inline size_t literal_index_near(uint64_t rva) {
+        if (!il2cppBase)
+            return SIZE_MAX;
+        auto* p = reinterpret_cast<unsigned char*>(il2cppBase) + rva;
+        for (int back = 0; back < 0x40; ++back) {
+            unsigned char* q = p - back;
+            if (q < static_cast<unsigned char*>(il2cppBase))
+                break;
+            // B8+rd imm32 (mov r32, imm32) or 41 B8+rd imm32 (r8d..r15d)
+            unsigned char op = q[0];
+            if (op >= 0xB8 && op <= 0xBF) {
+                uint32_t imm;
+                std::memcpy(&imm, q + 1, 4);
+                if (imm < 0x400000)
+                    return imm;
+            }
+            if (op == 0x41 && q[1] >= 0xB8 && q[1] <= 0xBF) {
+                uint32_t imm;
+                std::memcpy(&imm, q + 2, 4);
+                if (imm < 0x400000)
+                    return imm;
+            }
+        }
+        return SIZE_MAX;
+    }
+
+    // Finds a method json by its "ns.Class::method" label. Tries the parsed
+    // path first, then a direct string match against the exact label form that
+    // method_map uses (handles odd names with dots/backticks/brackets).
+    inline nlohmann::json* find_method(const std::string& label) {
+        auto dot = label.rfind("::");
+        if (dot == std::string::npos)
+            return nullptr;
+        std::string class_part = label.substr(0, dot);
+        std::string method_name = label.substr(dot + 2);
+        auto ns_dot = class_part.rfind('.');
+        std::string ns = ns_dot == std::string::npos ? "" : class_part.substr(0, ns_dot);
+        std::string cname = ns_dot == std::string::npos ? class_part : class_part.substr(ns_dot + 1);
+
+        for (auto& [image, nss] : il2cpp_classes.items())
+            for (auto& [ns2, clss] : nss.items()) {
+                if (ns2 != ns)
+                    continue;
+                for (auto& [cname2, info] : clss.items()) {
+                    if (cname2 != cname)
+                        continue;
+                    for (auto& m : info["methods"])
+                        if (m.value("name", "") == method_name)
+                            return &m;
+                }
+            }
+
+        // fallback: brute-force the exact label
+        for (auto& [image, nss] : il2cpp_classes.items())
+            for (auto& [ns2, clss] : nss.items())
+                for (auto& [cname2, info] : clss.items())
+                    for (auto& m : info["methods"])
+                        if (label == (ns2.empty() ? "" : ns2 + ".") + cname2 + "::" + m.value("name", ""))
+                            return &m;
+        return nullptr;
+    }
+
+    // Adds "strings": [...] to every method and "methods": [...] to every
+    // string entry based on the reference scan.
+    inline void build_string_xrefs(const meta::MetadataInfo& metadata, void* table) {
+        size_t total = metadata.valid ? metadata.literals.size() : 0;
+        if (!table || total == 0) {
+            dlog::warn("string xrefs skipped (no table or no metadata)");
+            return;
+        }
+
+        method_map mm;
+        mm.build(il2cpp_classes);
+
+        // 1) find the runtime table slot (holds the heap table pointer)
+        void* slot = find_table_slot(table);
+        dlog::info("string table slot: %p", slot);
+
+        std::vector<std::pair<uint64_t, size_t>> refs;
+        if (slot) {
+            // 2a) code references to the slot -> literal uses (index via the
+            //     getter or inline [slot + idx*8]). For each slot reference
+            //     site, also look a few instructions ahead for the getter-call
+            //     pattern (mov edx,<index>; call GetStringLiteral) and recover
+            //     the index from the immediate.
+            for (uint64_t rva : find_rip_refs_to(slot)) {
+                refs.emplace_back(rva, SIZE_MAX);
+                // try to recover a concrete literal index used at this site
+                size_t idx = literal_index_near(rva);
+                if (idx != SIZE_MAX)
+                    refs.emplace_back(rva + 1, idx); // distinct key so it annotates
+            }
+            // 2b) direct references into the heap table itself (older codegen)
+            for (auto& r : find_literal_references(table, total))
+                refs.push_back(r);
+        } else {
+            refs = find_literal_references(table, total);
+        }
+        dlog::info("found %zu literal reference sites", refs.size());
+
+        // dedupe + map to methods
+        std::map<std::string, std::vector<size_t>> strings_by_method;
+        std::map<std::string, int> method_ref_count;
+        for (const auto& [rva, index] : refs) {
+            std::string label = mm.containing(rva);
+            dlog::info("  ref rva=0x%llx label='%s'", (unsigned long long)rva, label.c_str());
+            std::string key = label.empty() ? ("sub_" + std::to_string(rva)) : label;
+            method_ref_count[key]++;
+            if (index != SIZE_MAX && index < il2cpp_strings.size())
+                strings_by_method[key].push_back(index);
+        }
+
+        // annotate methods: add "strings" list (indices with known index) and
+        // "string_count" (total refs, incl. indirect via slot)
+        for (auto& [label, indices] : strings_by_method) {
+            std::sort(indices.begin(), indices.end());
+            indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+            auto* m = find_method(label);
+            if (!m)
+                continue;
+            (*m)["strings"] = indices;
+        }
+        for (auto& [label, count] : method_ref_count) {
+            auto* m = find_method(label);
+            if (m)
+                (*m)["string_count"] = count;
+            else
+                dlog::info("  xref method not in dump: %s", label.c_str());
+        }
+
+        // annotate string entries: "methods" = list of labels that use them
+        for (auto& [label, indices] : strings_by_method) {
+            for (size_t index : indices) {
+                if (index >= il2cpp_strings.size())
+                    continue;
+                if (!il2cpp_strings[index].contains("methods"))
+                    il2cpp_strings[index]["methods"] = nlohmann::json::array();
+                il2cpp_strings[index]["methods"].push_back(label);
+            }
+        }
+
+        dlog::good("string xrefs built: %zu methods reference literals", method_ref_count.size());
     }
 
 }

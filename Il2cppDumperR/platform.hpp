@@ -157,7 +157,7 @@ namespace plat {
 
     // Contiguous readable memory regions belonging to a module (PE sections /
     // ELF mappings). Used by pattern scanning over a module's memory.
-    struct region { void* first; void* last; };
+    struct region { void* first; void* last; bool executable = false; };
 
     inline std::vector<region> module_regions(const char* name) {
         std::vector<region> out;
@@ -171,7 +171,9 @@ namespace plat {
         for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
             if (sec->Misc.VirtualSize == 0)
                 continue;
-            out.push_back({ base + sec->VirtualAddress, base + sec->VirtualAddress + sec->Misc.VirtualSize });
+            out.push_back({ base + sec->VirtualAddress,
+                            base + sec->VirtualAddress + sec->Misc.VirtualSize,
+                            (sec->Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0 });
         }
 #else
         std::string mod = name;
@@ -189,7 +191,8 @@ namespace plat {
             std::string p(path);
             if (p.length() < mod.length() || p.compare(p.length() - mod.length(), mod.length(), mod) != 0)
                 continue;
-            out.push_back({ reinterpret_cast<void*>(start), reinterpret_cast<void*>(end) });
+            out.push_back({ reinterpret_cast<void*>(start), reinterpret_cast<void*>(end),
+                            perms[2] == 'x' });
         }
         std::fclose(f);
 #endif

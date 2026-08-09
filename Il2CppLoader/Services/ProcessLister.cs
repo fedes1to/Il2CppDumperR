@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Il2CppLoader.Services;
 
@@ -10,7 +12,9 @@ public sealed record ProcessItem(int Pid, string Name, string Path, string Kind)
 
 /// <summary>
 /// Cross-platform process enumeration. On Linux, resolves exe paths through
-/// /proc and tags Wine-hosted Windows processes.
+/// /proc and handles Wine-hosted Windows processes, whose /proc/pid/exe points
+/// to wine-preloader — the real game path is recovered from the cmdline
+/// (relative, "Z:\..." and mixed-slash forms are all normalized).
 /// </summary>
 public static class ProcessLister
 {
@@ -21,11 +25,9 @@ public static class ProcessLister
         {
             try
             {
-                string path = GetExePath(p);
-                if (string.IsNullOrEmpty(path))
-                    continue;
-                string kind = Classify(p, path);
-                result.Add(new ProcessItem(p.Id, p.ProcessName, path, kind));
+                var item = Inspect(p);
+                if (item != null)
+                    result.Add(item);
             }
             catch { }
             finally { p.Dispose(); }
@@ -34,49 +36,100 @@ public static class ProcessLister
         return result;
     }
 
-    private static string GetExePath(Process p)
-    {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-        {
-            try
-            {
-                var link = $"/proc/{p.Id}/exe";
-                var target = new FileInfo(link).ResolveLinkTarget(true);
-                if (target != null)
-                    return target.FullName;
-            }
-            catch { }
-            // wine processes: read cmdline
-            try
-            {
-                var cmd = File.ReadAllText($"/proc/{p.Id}/cmdline").Replace('\0', ' ').Trim();
-                return cmd.Split(' ')[0];
-            }
-            catch { }
-            return "";
-        }
-        try
-        {
-            return p.MainModule?.FileName ?? "";
-        }
-        catch { }
-        return "";
-    }
-
-    private static string Classify(Process p, string path)
+    private static ProcessItem? Inspect(Process p)
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            return "WIN";
-        if (path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-            return "WINE";
+        {
+            string path;
+            try { path = p.MainModule?.FileName ?? ""; }
+            catch { return null; }
+            if (string.IsNullOrEmpty(path))
+                return null;
+            return new ProcessItem(p.Id, p.ProcessName, path, "WIN");
+        }
+
+        string exeLink;
         try
         {
-            var cmd = File.ReadAllText($"/proc/{p.Id}/cmdline");
-            if (cmd.Contains("wine", StringComparison.OrdinalIgnoreCase) ||
-                cmd.Contains(".exe", StringComparison.OrdinalIgnoreCase))
-                return "WINE";
+            var target = new FileInfo($"/proc/{p.Id}/exe").ResolveLinkTarget(true);
+            exeLink = target?.FullName ?? "";
+        }
+        catch { exeLink = ""; }
+
+        string cmdline = "";
+        try { cmdline = File.ReadAllText($"/proc/{p.Id}/cmdline"); } catch { }
+
+        bool isWine = exeLink.Contains("wine", StringComparison.OrdinalIgnoreCase);
+
+        if (isWine)
+        {
+            // recover the windows executable from the cmdline
+            string? gamePath = ResolveWineExe(p.Id, cmdline);
+            if (gamePath == null)
+                return null;
+            return new ProcessItem(p.Id, System.IO.Path.GetFileNameWithoutExtension(gamePath), gamePath, "WINE");
+        }
+
+        if (!string.IsNullOrEmpty(exeLink))
+            return new ProcessItem(p.Id, p.ProcessName, exeLink, "LNX");
+
+        // fallback: first cmdline token
+        if (cmdline.Length > 0)
+        {
+            string first = cmdline.Split('\0')[0];
+            if (!string.IsNullOrEmpty(first))
+                return new ProcessItem(p.Id, p.ProcessName, first, "LNX");
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Extracts the game .exe path from a wine process cmdline and maps it to
+    /// a Linux path. Handles "VRisingServer.exe" (relative to the process cwd),
+    /// "Z:\home\...\Game.exe", "Z:/home/...\Game.exe" and plain linux paths.
+    /// Returns null for wine-internal programs (C:\windows\...).
+    /// </summary>
+    private static string? ResolveWineExe(int pid, string cmdline)
+    {
+        if (cmdline.Length == 0)
+            return null;
+        var tokens = cmdline.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length == 0)
+            return null;
+
+        string first = tokens[0].Trim('"');
+        if (!first.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        // Z:\... or Z:/... -> the linux filesystem root mapping
+        if (first.Length > 2 && char.ToUpperInvariant(first[0]) == 'Z' && first[1] == ':')
+        {
+            string mapped = first[2..].Replace('\\', '/');
+            if (!mapped.StartsWith('/'))
+                mapped = "/" + mapped;
+            return File.Exists(mapped) ? mapped : null;
+        }
+
+        // other drive letters (C:\...) live inside the wine prefix — not a game path
+        if (first.Length > 2 && char.IsLetter(first[0]) && first[1] == ':')
+            return null;
+
+        // already a linux path
+        if (first.StartsWith('/'))
+            return File.Exists(first) ? first : null;
+
+        // relative -> resolve against the process working directory
+        try
+        {
+            var cwd = new FileInfo($"/proc/{pid}/cwd").ResolveLinkTarget(true)?.FullName;
+            if (cwd != null)
+            {
+                string combined = System.IO.Path.GetFullPath(Path.Combine(cwd, first));
+                if (File.Exists(combined))
+                    return combined;
+            }
         }
         catch { }
-        return "LNX";
+        return null;
     }
 }

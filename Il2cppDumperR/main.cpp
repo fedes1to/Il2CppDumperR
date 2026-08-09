@@ -91,7 +91,13 @@ static void dump_worker(void* module_handle) {
         il2cpp_class_for_each(dump_class, nullptr);
         dlog::good("finished dumping %d classes", dumped_class_count);
 
-        // write the class dump FIRST so a string-dump failure can't lose it
+        // dump string literals from memory
+        strdump::dump_strings(il2cpp_metadata);
+
+        // string <-> method xrefs (requires the classes dump + table)
+        strdump::build_string_xrefs(il2cpp_metadata, strdump::g_found_table);
+
+        // write the class dump AFTER xrefs so method annotations land on disk
         const std::string dir = plat::executable_dir();
         try {
             std::ofstream out(dir + "/il2cpp_classes.json", std::ios::trunc);
@@ -100,9 +106,6 @@ static void dump_worker(void* module_handle) {
         } catch (const std::exception& e) {
             dlog::error("failed writing class dump: %s", e.what());
         }
-
-        // dump string literals from memory
-        strdump::dump_strings(il2cpp_metadata);
 
         if (!il2cpp_strings.empty()) {
             try {

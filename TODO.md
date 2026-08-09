@@ -31,3 +31,22 @@ Order of execution (as requested):
       fallback). Managed-name obfuscation needs nothing: we read runtime metadata.
 
 Nice-to-have (explicitly out of scope): DummyDll creation, dump.cs creation.
+
+## Next steps (TODO)
+
+- [x] **String xrefs** — for every string literal, find which methods reference it:
+      scans GameAssembly code for RIP-relative refs to the s_StringLiteralTable slot
+      (found dynamically: the writable slot whose value == the heap table pointer),
+      plus direct `lea [rip+idx*8+table]` refs; annotates methods with `string_count` /
+      `strings` (indices) and string entries with `methods`. Verified on the real game
+      (V Rising DS: table slot discovered, 7 literal-using sites, method annotated).
+      NOTE: dedicated-server builds strip most string-heavy client code from IL2CPP,
+      so counts are low there — client builds will have thousands.
+      TODO: decode `mov edx,imm; call getter` sites for per-index xrefs (literal_index_near
+      already implemented, getter-call decoding next).
+- [ ] **Output path control** — when injecting via the UI, write the dumps to the
+      directory the UI is run from (or a user-chosen folder), not the game folder;
+      add an output-path option. (env var override `IL2CPP_DUMP_DIR` planned.)
+- [ ] **Fix .gitignore** — the repo `.gitignore` currently misses the loader's
+      bin/obj directories and the fake-run / steamcmd scratch folders.
+

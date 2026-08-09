@@ -1,4 +1,12 @@
 build/
 bin/
+obj/
 *.user
 .vs/
+Il2CppLoader/bin/
+Il2CppLoader/obj/
+test/Il2CppLoader.CliTest/bin/
+test/Il2CppLoader.CliTest/obj/
+steamcmd/
+CrabGame/
+Muck/
