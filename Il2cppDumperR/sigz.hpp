@@ -1,274 +1,270 @@
 #pragma once
-#include <span>
+// sigz — pattern scanning library.
+// Based on upstream https://github.com/creaffy/sigz (updated), extended with a
+// portable backend so it works on Windows (VirtualQuery / PE headers) and on
+// Linux (/proc/self/maps) for native .so targets.
+
 #include <vector>
 #include <string>
+#include <string_view>
 #include <ranges>
-#include <expected>
-#include <algorithm>
+#include <cstring>
+
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
+#include <algorithm>
+#endif
+
+#define sigz_min(a, b) (((a) < (b)) ? (a) : (b))
+#define sigz_max(a, b) (((a) > (b)) ? (a) : (b))
 
 namespace sigz {
-    constexpr inline std::int16_t WILDCARD = -1;
-    constexpr inline std::size_t NO_LIMIT = 0;
+    constexpr inline int WILDCARD = -1;
+    constexpr inline int NO_LIMIT = -1;
 
-    enum SIG_FORMAT {
-        ida,    // "0A ? ? CD 69 69 AB"
-        x64dbg, // "0A ?? ?? CD 69 69 AB"
-        string,
-        value
-    };
-
-    enum RET_TYPE {
-        vec, // std::vector<void*>
-        ptr  // void*
-    };
-
-    enum class ERROR_CODE {
-        WINAPI_FAIL,
-        MODULE_NOT_FOUND,
-        BAD_SIGNATURE,
-    };
-
-    // INTERNAL FUNCTIONS
-
-    [[nodiscard]] inline bool _Verify_Signature(
-        const std::vector<std::int16_t>& _Signature
+    [[nodiscard]] inline void* scan_unsafe_first(
+        void* first,
+        void* last,
+        const std::vector<int>& pattern
     ) {
-        return !_Signature.empty() && std::ranges::all_of(_Signature, [](auto e) { return (e <= 0xff && e >= 0x00) || e == WILDCARD; });
-    }
-
-    [[nodiscard]] inline std::vector<void*> _Scan_Unchecked(
-        std::uint8_t* _First,
-        std::uint8_t* _Last,
-        const std::vector<std::int16_t>& _Pattern,
-        std::size_t _Limit
-    ) {
-        std::vector<void*> _Results{};
-        for (std::uint8_t* _Ptr = _First; _Ptr < _Last - _Pattern.size(); ++_Ptr) {
-            bool _Found = true;
-            for (std::size_t i = 0; i < _Pattern.size(); ++i) {
-                if (_Pattern[i] == WILDCARD || _Ptr[i] == _Pattern[i]) {
+        for (unsigned char* ptr = reinterpret_cast<unsigned char*>(first); ptr < reinterpret_cast<unsigned char*>(last) - pattern.size() + 1; ++ptr) {
+            bool found = true;
+            for (size_t i = 0; i < pattern.size(); ++i) {
+                if (pattern[i] == sigz::WILDCARD || ptr[i] == pattern[i])
                     continue;
-                }
-                _Found = false;
+                found = false;
                 break;
             }
-            if (_Found) {
-                _Results.push_back(reinterpret_cast<void*>(_Ptr));
-                if (_Limit != NO_LIMIT && _Results.size() == _Limit) {
-                    break;
-                }
-            }
+            if (found)
+                return ptr;
         }
-        return _Results;
+        return nullptr;
     }
 
-    // HELPER FUNCTIONS
-
-    template <SIG_FORMAT>
-    struct _Make_Sig_Fn;
-
-    template <>
-    struct _Make_Sig_Fn<ida> {
-        [[nodiscard]] std::vector<std::int16_t> operator()(
-            std::string_view _Pattern
-            ) const {
-            std::vector<std::int16_t> _Result{};
-            for (auto&& _Token : std::ranges::split_view(_Pattern, ' ') | std::views::transform([](auto e) { return std::string_view(e); })) {
-                _Result.push_back(_Token == "?" ? WILDCARD : static_cast<std::int16_t>(std::stoi(_Token.data(), nullptr, 16)));
-            }
-            while (!_Result.empty() && _Result.back() == WILDCARD) {
-                _Result.pop_back();
-            }
-            return _Result;
-        }
-    };
-
-    template <>
-    struct _Make_Sig_Fn<x64dbg> {
-        [[nodiscard]] std::vector<std::int16_t> operator()(
-            std::string_view _Pattern
-            ) const {
-            std::vector<std::int16_t> _Result{};
-            for (auto&& _Token : std::ranges::split_view(_Pattern, ' ') | std::views::transform([](auto e) { return std::string_view(e); })) {
-                _Result.push_back(_Token == "??" ? WILDCARD : static_cast<std::int16_t>(std::stoi(_Token.data(), nullptr, 16)));
-            }
-            while (!_Result.empty() && _Result.back() == WILDCARD) {
-                _Result.pop_back();
-            }
-            return _Result;
-        }
-    };
-
-    template <>
-    struct _Make_Sig_Fn<string> {
-        [[nodiscard]] std::vector<std::int16_t> operator()(
-            std::string_view _String,
-            bool _Null = true
-            ) const {
-            return std::vector<std::int16_t>(_String.begin(), _Null ? _String.end() + 1 : _String.end());
-        }
-
-        [[nodiscard]] std::vector<std::int16_t> operator()(
-            std::wstring_view _String,
-            bool _Null = true
-            ) const {
-            auto _First = reinterpret_cast<const std::int8_t*>(_String.data());
-            auto _Last = reinterpret_cast<const std::int8_t*>(_String.data()) + _String.length();
-            return std::vector<std::int16_t>(_First, _Null ? _Last + 1 : _Last);
-        }
-    };
-
-    template <>
-    struct _Make_Sig_Fn<value> {
-        template <class _Ty>
-        [[nodiscard]] std::vector<std::int16_t> operator()(
-            const _Ty& _Value
-            ) const {
-            return std::vector<std::int16_t>(reinterpret_cast<const std::int8_t*>(&_Value), reinterpret_cast<const std::int8_t*>(&_Value) + sizeof(_Ty));
-        }
-    };
-
-    template <SIG_FORMAT _Format>
-    constexpr inline _Make_Sig_Fn<_Format> make_sig;
-
-    [[nodiscard]] constexpr inline std::string_view to_string(
-        ERROR_CODE _Err
+    [[nodiscard]] inline std::vector<void*> scan_unsafe(
+        void* first,
+        void* last,
+        const std::vector<int>& pattern,
+        size_t limit = sigz::NO_LIMIT
     ) {
-        using enum ERROR_CODE;
-        switch (_Err) {
-        case WINAPI_FAIL: return "WINAPI_FAIL";
-        case MODULE_NOT_FOUND: return "MODULE_NOT_FOUND";
-        case BAD_SIGNATURE: return "BAD_SIGNATURE";
-        default: return "UNKNOWN";
-        };
+        std::vector<void*> results{};
+        void* next = first;
+        while ((results.size() != limit || limit == sigz::NO_LIMIT) && next < last) {
+            void* ptr = sigz::scan_unsafe_first(next, last, pattern);
+            if (ptr == nullptr)
+                break;
+            next = reinterpret_cast<char*>(ptr) + 1;
+            results.push_back(ptr);
+        }
+        return results;
     }
 
-    // NORMAL SCAN
+#ifndef _WIN32
+    namespace detail {
+        struct map_region {
+            void* first;
+            void* last;
+            bool readable;
+            std::string path;
+        };
 
-    template <RET_TYPE>
-    struct _Scan_Fn;
-
-    template <>
-    struct _Scan_Fn<vec> {
-        [[nodiscard]] std::expected<std::vector<void*>, ERROR_CODE> operator()(
-            std::uint8_t* _First,
-            std::uint8_t* _Last,
-            const std::vector<std::int16_t>& _Signature,
-            std::size_t _Limit = NO_LIMIT
-            ) const {
-            if (!_Verify_Signature(_Signature)) {
-                return std::unexpected(ERROR_CODE::BAD_SIGNATURE);
-            }
-
-            std::vector<MEMORY_BASIC_INFORMATION> _Regions{};
-            MEMORY_BASIC_INFORMATION _Mem_Info{};
-
-            for (std::uint8_t* _Ptr = _First; _Ptr < _Last; ++_Ptr) {
-                if (!VirtualQuery(_Ptr, &_Mem_Info, sizeof(_Mem_Info))) {
-                    return std::unexpected(ERROR_CODE::WINAPI_FAIL);
-                }
-
-                _Regions.push_back(_Mem_Info);
-                _Ptr += _Mem_Info.RegionSize;
-            }
-
-            std::size_t _Original_Limit = _Limit;
-            std::vector<void*> _Results{};
-
-            for (auto& _Region : _Regions) {
-                if ((_Region.State & (MEM_COMMIT | MEM_RESERVE)) == 0 || _Region.Protect == 0 || (_Region.Protect & 0xf6) == 0 || (_Region.Protect & 0x40000301) != 0) {
+        // Parses /proc/self/maps. If `module` is non-empty, only regions backed
+        // by a file whose path ends with `module` are returned.
+        [[nodiscard]] inline std::vector<map_region> get_regions(std::string_view module = {}) {
+            std::vector<map_region> regions{};
+            FILE* f = std::fopen("/proc/self/maps", "r");
+            if (!f)
+                return regions;
+            char line[1024];
+            while (std::fgets(line, sizeof(line), f)) {
+                unsigned long long start = 0, end = 0;
+                char perms[8] = {};
+                char path[512] = {};
+                int fields = std::sscanf(line, "%llx-%llx %7s %*s %*s %*s %511[^\n]", &start, &end, perms, path);
+                if (fields < 3)
                     continue;
+                if (perms[0] != 'r') // not readable
+                    continue;
+                if (!module.empty()) {
+                    std::string_view p(path);
+                    if (p.length() < module.length() || p.substr(p.length() - module.length()) != module)
+                        continue;
                 }
-
-                auto _Region_First = reinterpret_cast<std::uint8_t*>(_Region.BaseAddress);
-                auto _Region_Last = reinterpret_cast<std::uint8_t*>(_Region.BaseAddress) + _Region.RegionSize;
-
-                auto _Region_Results = _Scan_Unchecked(max(_First, _Region_First), min(_Last, _Region_Last), _Signature, _Limit);
-
-                for (auto _Ptr : _Region_Results) {
-                    _Results.push_back(_Ptr);
-                }
-
-                if (_Region_Results.size() != _Limit) {
-                    _Limit -= _Region_Results.size();
-                }
-
-                if (_Original_Limit != NO_LIMIT && _Limit == 0) {
-                    break;
-                }
+                regions.push_back({ reinterpret_cast<void*>(start), reinterpret_cast<void*>(end), true, path });
             }
-
-            return _Results;
+            std::fclose(f);
+            return regions;
         }
-    };
+    }
+#endif
 
-    template <>
-    struct _Scan_Fn<ptr> {
-        [[nodiscard]] std::expected<void*, ERROR_CODE> operator()(
-            std::uint8_t* _First,
-            std::uint8_t* _Last,
-            const std::vector<std::int16_t>& _Signature
-            ) const {
-            auto _Result = _Scan_Fn<vec>{}(_First, _Last, _Signature, 1);
-            if (!_Result.has_value()) {
-                return std::unexpected(_Result.error());
-            }
-            else {
-                return _Result->empty() ? nullptr : _Result->front();
-            }
+    [[nodiscard]] inline std::vector<void*> scan(
+        void* first,
+        void* last,
+        const std::vector<int>& pattern,
+        size_t limit = sigz::NO_LIMIT
+    ) {
+#ifdef _WIN32
+        std::vector<MEMORY_BASIC_INFORMATION> regions{};
+        MEMORY_BASIC_INFORMATION region_info{};
+        for (char* ptr = reinterpret_cast<char*>(first); ptr < reinterpret_cast<char*>(last); ++ptr) {
+            if (!VirtualQuery(ptr, &region_info, sizeof(region_info)))
+                return {};
+            regions.push_back(region_info);
+            ptr += region_info.RegionSize;
         }
-    };
-
-    template <RET_TYPE _Type = vec>
-    constexpr inline _Scan_Fn<_Type> scan;
-    constexpr inline _Scan_Fn<ptr> scan_first;
-
-    // IMAGE SCAN
-
-    template <RET_TYPE>
-    struct _Scan_Img_Fn;
-
-    template <>
-    struct _Scan_Img_Fn<vec> {
-        [[nodiscard]] std::expected<std::vector<void*>, ERROR_CODE> operator()(
-            std::string_view _Module,
-            const std::vector<std::int16_t>& _Signature,
-            std::size_t _Limit = NO_LIMIT
-            ) const {
-            if (!_Verify_Signature(_Signature)) {
-                return std::unexpected(ERROR_CODE::BAD_SIGNATURE);
-            }
-
-            std::uint8_t* _Base = reinterpret_cast<std::uint8_t*>(GetModuleHandleA(_Module.data()));
-            if (!_Base) {
-                return std::unexpected(ERROR_CODE::MODULE_NOT_FOUND);
-            }
-
-            IMAGE_DOS_HEADER* _Dos_Header = reinterpret_cast<IMAGE_DOS_HEADER*>(_Base);
-            IMAGE_NT_HEADERS* _Nt_Headers = reinterpret_cast<IMAGE_NT_HEADERS*>(_Base + _Dos_Header->e_lfanew);
-
-            return _Scan_Unchecked(_Base, _Base + _Nt_Headers->OptionalHeader.SizeOfImage, _Signature, _Limit);
+        size_t remaining = limit;
+        std::vector<void*> results{};
+        for (auto& region : regions) {
+            constexpr DWORD flags1 = PAGE_EXECUTE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE | PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY;
+            constexpr DWORD flags2 = PAGE_TARGETS_INVALID | PAGE_GUARD | PAGE_NOCACHE | PAGE_NOACCESS;
+            if ((region.State & (MEM_COMMIT | MEM_RESERVE)) == 0 || region.Protect == 0 || (region.Protect & flags1) == 0 || (region.Protect & flags2) != 0)
+                continue;
+            void* region_first = region.BaseAddress;
+            void* region_last = reinterpret_cast<char*>(region.BaseAddress) + region.RegionSize;
+            auto region_results = sigz::scan_unsafe(sigz_max(first, region_first), sigz_min(last, region_last), pattern, remaining);
+            for (void* ptr : region_results)
+                results.push_back(ptr);
+            if (region_results.size() != remaining)
+                remaining -= region_results.size();
+            if (limit != sigz::NO_LIMIT && remaining == 0)
+                break;
         }
-    };
-
-    template <>
-    struct _Scan_Img_Fn<ptr> {
-        [[nodiscard]] std::expected<void*, ERROR_CODE> operator()(
-            std::string_view _Module,
-            const std::vector<std::int16_t>& _Signature
-            ) const {
-            auto _Result = _Scan_Img_Fn<vec>{}(_Module, _Signature, 1);
-            if (!_Result.has_value()) {
-                return std::unexpected(_Result.error());
-            }
-            else {
-                return _Result->empty() ? nullptr : _Result->front();
-            }
+        return results;
+#else
+        size_t remaining = limit;
+        std::vector<void*> results{};
+        for (auto& region : detail::get_regions()) {
+            void* region_first = sigz_max(first, region.first);
+            void* region_last = sigz_min(last, region.last);
+            if (region_first >= region_last)
+                continue;
+            auto region_results = sigz::scan_unsafe(region_first, region_last, pattern, remaining);
+            for (void* ptr : region_results)
+                results.push_back(ptr);
+            if (region_results.size() != remaining)
+                remaining -= region_results.size();
+            if (limit != sigz::NO_LIMIT && remaining == 0)
+                break;
         }
-    };
+        return results;
+#endif
+    }
 
-    template <RET_TYPE _Type = vec>
-    constexpr inline _Scan_Img_Fn<_Type> scan_image;
-    constexpr inline _Scan_Img_Fn<ptr> scan_image_first;
+    [[nodiscard]] inline void* scan_first(
+        void* first,
+        void* last,
+        const std::vector<int>& pattern
+    ) {
+        std::vector<void*> result = sigz::scan(first, last, pattern, 1);
+        return result.empty() ? nullptr : result.front();
+    }
+
+    [[nodiscard]] inline std::vector<void*> scan_image(
+        std::string_view name,
+        const std::vector<int>& pattern,
+        size_t limit = sigz::NO_LIMIT
+    ) {
+#ifdef _WIN32
+        char* base = reinterpret_cast<char*>(GetModuleHandleA(name.data()));
+        if (!base)
+            return {};
+        IMAGE_DOS_HEADER* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+        IMAGE_NT_HEADERS* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+        return sigz::scan_unsafe(base, base + nt->OptionalHeader.SizeOfImage, pattern, limit);
+#else
+        std::vector<void*> results{};
+        size_t remaining = limit;
+        for (auto& region : detail::get_regions(name)) {
+            auto region_results = sigz::scan_unsafe(region.first, region.last, pattern, remaining);
+            for (void* ptr : region_results)
+                results.push_back(ptr);
+            if (region_results.size() != remaining)
+                remaining -= region_results.size();
+            if (limit != sigz::NO_LIMIT && remaining == 0)
+                break;
+        }
+        return results;
+#endif
+    }
+
+    [[nodiscard]] inline void* scan_image_first(
+        std::string_view name,
+        const std::vector<int>& pattern
+    ) {
+        std::vector<void*> result = sigz::scan_image(name, pattern, 1);
+        return result.empty() ? nullptr : result.front();
+    }
+
+    [[nodiscard]] inline void* scan_process_first(
+        const std::vector<int>& pattern
+    ) {
+#ifdef _WIN32
+        SYSTEM_INFO si{};
+        GetSystemInfo(&si);
+        return sigz::scan_first(si.lpMinimumApplicationAddress, si.lpMaximumApplicationAddress, pattern);
+#else
+        return sigz::scan_first(nullptr, reinterpret_cast<void*>(UINTPTR_MAX), pattern);
+#endif
+    }
+
+    [[nodiscard]] inline std::vector<void*> scan_process(
+        const std::vector<int>& pattern,
+        size_t limit = sigz::NO_LIMIT
+    ) {
+#ifdef _WIN32
+        SYSTEM_INFO si{};
+        GetSystemInfo(&si);
+        return sigz::scan(si.lpMinimumApplicationAddress, si.lpMaximumApplicationAddress, pattern, limit);
+#else
+        return sigz::scan(nullptr, reinterpret_cast<void*>(UINTPTR_MAX), pattern, limit);
+#endif
+    }
+
+    namespace make {
+        [[nodiscard]] inline std::vector<int> ida(
+            std::string_view pattern
+        ) {
+            std::vector<int> result{};
+            for (auto&& token : std::ranges::split_view(pattern, ' ') | std::views::transform([](auto e) { return std::string_view(e); }))
+                result.push_back(token == "?" ? sigz::WILDCARD : std::stoi(std::string(token), nullptr, 16));
+            return result;
+        }
+
+        [[nodiscard]] inline std::vector<int> x64dbg(
+            std::string_view pattern
+        ) {
+            std::vector<int> result{};
+            for (auto&& token : std::ranges::split_view(pattern, ' ') | std::views::transform([](auto e) { return std::string_view(e); }))
+                result.push_back(token == "??" ? sigz::WILDCARD : std::stoi(std::string(token), nullptr, 16));
+            return result;
+        }
+
+        [[nodiscard]] inline std::vector<int> string(
+            std::string_view str,
+            bool null = true
+        ) {
+            return std::vector<int>(str.begin(), null ? str.end() + 1 : str.end());
+        }
+
+        [[nodiscard]] inline std::vector<int> string(
+            std::wstring_view str,
+            bool null = true
+        ) {
+            const char* first = reinterpret_cast<const char*>(&*str.begin());
+            const char* last = reinterpret_cast<const char*>(&*str.end());
+            return std::vector<int>(first, null ? last + sizeof(wchar_t) : last);
+        }
+
+        template <class T>
+        [[nodiscard]] inline std::vector<int> value(
+            const T& data
+        ) {
+            return std::vector<int>(reinterpret_cast<const char*>(&data), reinterpret_cast<const char*>(&data) + sizeof(T));
+        }
+    }
 }

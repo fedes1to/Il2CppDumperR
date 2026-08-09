@@ -3,11 +3,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#if !defined(__cplusplus)
-#define bool uint8_t
-#endif // !__cplusplus
-#include <codecvt>
-
 typedef struct Il2CppClass Il2CppClass;
 typedef struct Il2CppType Il2CppType;
 typedef struct EventInfo EventInfo;
@@ -213,16 +208,48 @@ typedef struct Il2CppObject
 } Il2CppObject;
 
 // System.String
+// Layout is stable across all Unity versions (2017 -> 2023+):
+//   object header (klass + monitor), int32 length, then UTF-16 chars.
 typedef struct Il2CppString
 {
     Il2CppObject object;
     int32_t length;                             ///< Length of string *excluding* the trailing null (which is included in 'chars').
     Il2CppChar chars[0];
     std::string getString() const {
-        // Convert wchar_t to UTF-8 using Windows API
-        int size_needed = WideCharToMultiByte(CP_UTF8, 0, chars, length, nullptr, 0, nullptr, nullptr);
-        std::string u8_conv(size_needed, 0);
-        WideCharToMultiByte(CP_UTF8, 0, chars, length, &u8_conv[0], size_needed, nullptr, nullptr);
-        return u8_conv;
+        // Portable UTF-16 -> UTF-8 conversion (works on Windows, MinGW and Linux;
+        // Il2CppChar is char16_t/uint16_t everywhere except MSVC where it's wchar_t,
+        // which is also 16-bit there).
+        std::string out;
+        out.reserve(static_cast<size_t>(length) * 3 + 1);
+        for (int32_t i = 0; i < length; ++i) {
+            uint32_t cp = static_cast<uint16_t>(chars[i]);
+            if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < length) { // surrogate pair
+                uint32_t lo = static_cast<uint16_t>(chars[i + 1]);
+                if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    ++i;
+                } else {
+                    cp = 0xFFFD; // lone high surrogate
+                }
+            } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                cp = 0xFFFD; // lone low surrogate
+            }
+            if (cp < 0x80) {
+                out.push_back(static_cast<char>(cp));
+            } else if (cp < 0x800) {
+                out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+            } else if (cp < 0x10000) {
+                out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+                out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+            } else {
+                out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+                out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+                out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+            }
+        }
+        return out;
     }
 } Il2CppString;
