@@ -169,7 +169,11 @@ extern "C" void* fake_literal_dispatcher_body(unsigned int token) {
     unsigned int type = token >> 29;
     unsigned int idx = (token >> 1) & 0xFFFFFFF;
     ++g_fake_dispatch_calls;
-    std::printf("DISPATCH body: token=0x%x calls=%d this=%p\n", token, g_fake_dispatch_calls, (void*)&fake_literal_dispatcher_body);
+    {
+        uintptr_t caller = 0;
+        asm volatile("movq 0(%%rsp), %0" : "=r"(caller));
+        std::printf("DISPATCH body: token=0x%x calls=%d this=%p caller=%p\n", token, g_fake_dispatch_calls, (void*)&fake_literal_dispatcher_body, (void*)caller);
+    }
     std::fflush(stdout);
     if (type == 5 && idx < 8)
         return s_StringLiteralTable[idx];
@@ -178,6 +182,7 @@ extern "C" void* fake_literal_dispatcher_body(unsigned int token) {
 
 EXPORT void fake_use_literals() {
     // exercise a few literal indices through the dispatcher
+    std::printf("dispatcher addr = %p\n", (void*)&fake_literal_dispatcher);
     for (unsigned int idx : {0u, 1u, 4u, 7u}) {
         unsigned int token = (5u << 29) | (idx << 1) | 1u;
         fake_literal_dispatcher(token);

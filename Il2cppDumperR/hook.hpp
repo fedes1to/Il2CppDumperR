@@ -57,9 +57,14 @@ namespace hook {
     inline void* g_jumpback = nullptr;
 
 
-    // C++ logger called from the naked stub (kept in the header so both
-    // Windows/Linux builds share it). ret_addr is captured by the stub.
-    extern "C" inline void literal_hook_c(uint32_t token, uintptr_t ret_addr) {
+    // C++ logger called from the raw-byte stub. The stub captures the token
+    // (ABI arg) and the game's return address, calls this, then tail-jumps to
+    // target+5 with the stack EXACTLY as the stolen prologue (`push rdi;
+    // sub rsp,20h`) would leave it — so the original function body runs
+    // correctly and returns to the game.
+    extern "C" void literal_hook_c(uint32_t token, uintptr_t ret_addr) {
+        FILE* df = std::fopen("/tmp/hook_called.log", "a");
+        if (df) { std::fprintf(df, "C called token=0x%x ret=%p\n", token, (void*)ret_addr); std::fclose(df); }
         uint32_t type = token >> 29;
         uint32_t idx = (token >> 1) & 0xFFFFFFF;
         if (type == 5 && idx < 0x400000) {
@@ -69,20 +74,73 @@ namespace hook {
         }
     }
 
-    // Hook body: a plain C++ function (no naked asm). Called with the token in
-    // the ABI arg reg. Logs the use, then transfers to the trampoline, which
-    // replays the stolen prologue and jumps to target+5.
-    extern "C" uintptr_t literal_hook_dispatch(uintptr_t token) {
-        uint32_t type = static_cast<uint32_t>(token >> 29);
-        uint32_t idx = static_cast<uint32_t>((token >> 1) & 0xFFFFFFF);
-        if (type == 5 && idx < 0x400000) {
-            std::lock_guard<std::mutex> lk(g_hook_mutex);
-            if (g_literal_uses.size() < 2000000)
-                g_literal_uses.push_back({ idx, 0 });
-        }
-        // call original via trampoline
-        using fn_t = uintptr_t(*)(uintptr_t);
-        return reinterpret_cast<fn_t>(g_trampoline)(token);
+    // Raw-byte stub (works for MinGW/GCC/Linux, no naked asm). At entry the
+    // stack is [rsp]=game's retaddr (the dispatcher was CALLED). We replay the
+    // stolen prologue, call the logger, then tail-jmp to target+5 via
+    // g_jumpback (mov rax,imm64; jmp rax). Stack stays 0x28 below entry:
+    // push rdi (8) + sub rsp,20h (32) = 40 = 0x28, matching the prologue.
+    //
+    //   push rdi                 ; 57
+    //   sub rsp, 0x20            ; 48 83 EC 20
+    //   mov eax, edi             ; 89 F8      (SysV: token in edi)
+    //   mov rsi, [rsp+0x28]      ; 48 8B 74 24 28  (retaddr -> 2nd arg)
+    //   call literal_hook_c      ; E8 rel32
+    //   jmp [rip+0]              ; FF 25 00 00 00 00 -> g_jumpback
+    //   <8-byte g_jumpback ptr>
+#ifdef _WIN32
+    inline unsigned char literal_hook_stub_bytes[64] = {
+        0x57,                                             // push rdi
+        0x48, 0x83, 0xEC, 0x20,                           // sub rsp,20h
+        0x89, 0xC8,                                       // mov eax,ecx (win: token in ecx)
+        0x48, 0x8B, 0x94, 0x24, 0x28, 0x00, 0x00, 0x00,   // mov rdx,[rsp+28h]
+        0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov rax, imm64 (count)
+        0x48, 0xFF, 0xC0,                                 // inc rax
+        0x48, 0xA3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [imm64], rax (count)
+        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,               // jmp [rip+0]
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,   // g_jumpback ptr (37)
+    };
+    static constexpr int kJumpbackOff = 37;
+    static constexpr int kCountReadOff = 16;   // mov rax,imm64 -> imm at 16-23
+    static constexpr int kCountWriteOff = 28;  // mov [imm64],rax -> imm at 28-35
+    inline std::atomic<uint64_t> g_hook_count{0};
+#else
+    inline unsigned char literal_hook_stub_bytes[64] = {
+        0x57,                                             // push rdi
+        0x48, 0x83, 0xEC, 0x20,                           // sub rsp,20h
+        0x89, 0xF8,                                       // mov eax,edi
+        0x48, 0x8B, 0x74, 0x24, 0x28,                     // mov rsi,[rsp+28h]  (7-11)
+        0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov rax,imm64     (12-21, imm at 14)
+        0x48, 0xFF, 0xC0,                                 // inc rax           (22-23)
+        0x48, 0x89, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [imm64],rax   (25-28 op, imm at 29-36)
+        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,               // jmp [rip+0]       (37-42, reads [43])
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,   // g_jumpback ptr    (43-50)
+    };
+    static constexpr int kJumpbackOff = 43;
+    static constexpr int kCountReadOff = 14;
+    static constexpr int kCountWriteOff = 29;
+    inline std::atomic<uint64_t> g_hook_count{0};
+#endif
+
+    inline uintptr_t setup_stub_exec() {
+        unsigned char* mem = static_cast<unsigned char*>(
+#ifdef _WIN32
+            VirtualAlloc(nullptr, sizeof(literal_hook_stub_bytes), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+#else
+            mmap(nullptr, sizeof(literal_hook_stub_bytes), PROT_READ | PROT_WRITE | PROT_EXEC,
+                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+#endif
+        );
+        if (!mem)
+            return 0;
+        std::memcpy(mem, literal_hook_stub_bytes, sizeof(literal_hook_stub_bytes));
+        // patch mov rax,imm64 (count) and mov [imm64],rax (count) and jmp target
+        uint64_t count_addr = reinterpret_cast<uintptr_t>(&g_hook_count);
+        uint64_t jb_addr = reinterpret_cast<uintptr_t>(g_jumpback);
+        std::memcpy(mem + kCountReadOff, &count_addr, 8);
+        std::memcpy(mem + kCountWriteOff, &count_addr, 8);
+        std::memcpy(mem + kJumpbackOff, &jb_addr, 8);
+
+        return reinterpret_cast<uintptr_t>(mem);
     }
 
     inline bool make_rwx(void* p, size_t len) {
@@ -98,16 +156,18 @@ namespace hook {
 
     inline uintptr_t find_dispatcher() {
         // 1) by name (some builds export the metadata cache symbol)
-        if (void* sym = plat::get_proc(plat::get_module(plat::game_assembly_module_name()), "fake_literal_dispatcher"))
-            return reinterpret_cast<uintptr_t>(sym);
-        if (void* sym = plat::get_proc(plat::get_module(plat::game_assembly_module_name()), "il2cpp_metadata_cache_get_string_literal"))
-            return reinterpret_cast<uintptr_t>(sym);
-        // 2) signature: push rdi; sub rsp,20h; xor r9d,r9d; mov rdi,rcx; mov ecx,r9d; lock xadd [rdi],rcx
+        // 1) signature: push rdi; sub rsp,20h; xor r9d,r9d; mov rdi,rcx; mov ecx,r9d; lock xadd [rdi],rcx
         //    (Unity 2022.2+ win64 MetadataCache dispatcher)
         auto sig = sigz::make::ida("57 48 83 EC 20 45 33 C9 48 89 CF 44 89 C9 F0 0F C1 0F");
-        void* hit = sigz::scan_image_first(plat::game_assembly_module_name(), sig);
-        if (hit)
+        if (void* hit = sigz::scan_image_first(plat::game_assembly_module_name(), sig))
             return reinterpret_cast<uintptr_t>(hit);
+        // 1b) simpler prologue (fake/test builds): push rdi; sub rsp,20h; call
+        auto sig2 = sigz::make::ida("57 48 83 EC 20 E8");
+        if (void* hit = sigz::scan_image_first(plat::game_assembly_module_name(), sig2))
+            return reinterpret_cast<uintptr_t>(hit);
+        // 2) by name (some builds export the metadata cache symbol)
+        if (void* sym = plat::get_proc(plat::get_module(plat::game_assembly_module_name()), "il2cpp_metadata_cache_get_string_literal"))
+            return reinterpret_cast<uintptr_t>(sym);
         // 3) fallback: known RVA for Unity 2022.2+ (V Rising style)
         if (il2cppBase)
             return reinterpret_cast<uintptr_t>(il2cppBase) + 0x167add0;
@@ -117,12 +177,6 @@ namespace hook {
     inline void dump_dispatcher_bytes() {
         unsigned char b[16];
         std::memcpy(b, reinterpret_cast<void*>(g_target), 16);
-        dlog::info("dispatcher bytes: %02x %02x %02x %02x %02x | %02x %02x %02x %02x %02x",
-                   b[0],b[1],b[2],b[3],b[4], b[5],b[6],b[7],b[8],b[9]);
-        unsigned char s[32];
-        std::memcpy(s, reinterpret_cast<void*>(g_trampoline), 32);
-        dlog::info("trampoline: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
-                   s[0],s[1],s[2],s[3],s[4],s[5],s[6],s[7],s[8],s[9],s[10],s[11],s[12],s[13],s[14],s[15]);
     }
 
     inline bool install() {
@@ -175,11 +229,13 @@ namespace hook {
         jb[10] = 0xFF; jb[11] = 0xE0;
         g_jumpback = jb;
 
-        // patch target: jmp rel32 to literal_hook_dispatch
+        // patch target: jmp rel32 to the executable stub
+        uintptr_t stub = setup_stub_exec();
+        dlog::info("hook stub @ 0x%llx", (unsigned long long)stub);
         make_rwx(reinterpret_cast<void*>(g_target), 16);
         unsigned char* t = reinterpret_cast<unsigned char*>(g_target);
         t[0] = 0xE9;
-        int64_t rel2 = reinterpret_cast<uintptr_t>(&literal_hook_dispatch) - (g_target + 5);
+        int64_t rel2 = stub - (g_target + 5);
         std::memcpy(t + 1, &rel2, 4);
         g_hook_active = true;
         dlog::good("literal hook installed");

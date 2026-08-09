@@ -7,10 +7,13 @@
 #include <cstdio>
 #include <thread>
 #include <chrono>
+#include <string>
 
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <unistd.h>
+#include <limits.h>
 #include <dlfcn.h>
 #endif
 
@@ -27,9 +30,17 @@ int main() {
         return 1;
     }
 #else
-    if (!dlopen("./GameAssembly.so", RTLD_NOW | RTLD_GLOBAL)) {
-        std::fprintf(stderr, "failed to load GameAssembly.so: %s\n", dlerror());
-        return 1;
+    {
+        // absolute path so the dumper's get_module finds the SAME instance
+        char self[PATH_MAX];
+        ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+        std::string dir = n > 0 ? std::string(self, n).substr(0, std::string(self, n).find_last_of('/')) : ".";
+        std::string ga = dir + "/GameAssembly.so";
+        if (!dlopen(ga.c_str(), RTLD_NOW | RTLD_GLOBAL)) {
+            std::fprintf(stderr, "failed to load %s: %s\n", ga.c_str(), dlerror());
+            return 1;
+        }
+        std::printf("loaded %s\n", ga.c_str());
     }
 #endif
     std::puts("fake game running...");
@@ -40,11 +51,11 @@ int main() {
 #ifdef _WIN32
     use_literals = (use_literals_fn)GetProcAddress(GetModuleHandleA("GameAssembly.dll"), "fake_use_literals");
 #else
-    use_literals = (use_literals_fn)dlsym(dlopen("./GameAssembly.so", RTLD_NOW | RTLD_GLOBAL), "fake_use_literals");
+    use_literals = (use_literals_fn)dlsym(RTLD_DEFAULT, "fake_use_literals");
 #endif
     std::printf("use_literals=%p\n", (void*)use_literals);
     std::fflush(stdout);
-    for (int i = 0; i < 100; ++i) {
+    for (int i = 0; i < 200; ++i) {
         if (use_literals)
             use_literals();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

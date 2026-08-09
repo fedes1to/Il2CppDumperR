@@ -134,14 +134,47 @@ static void dump_worker(void* module_handle) {
         if (il2cpp_thread_attach)
             il2cpp_thread_attach(il2cpp_domain); // attach to game
 
-        // install the literal-use hook (opt-in: IL2CPP_STRING_HOOK=1). The
-        // static xref scan works without it; the hook captures live (index,
-        // return-address) uses while the game runs, for active games. Off by
-        // default since it patches game code.
-        const char* hook_env = std::getenv("IL2CPP_STRING_HOOK");
-        bool want_hook = hook_env && *hook_env == '1';
-        if (want_hook)
+        // install the literal-use hook (opt-in). The static xref scan works
+        // without it; the hook captures live (index, return-address) uses while
+        // the game runs. Enabled by IL2CPP_STRING_HOOK=1 env OR a config file
+        // "il2cpp_string_hook.txt" (contents "1") next to this module — the
+        // loader writes the config file, which survives wine env propagation.
+        bool want_hook = false;
+        {
+            const char* hook_env = std::getenv("IL2CPP_STRING_HOOK");
+            want_hook = hook_env && *hook_env == '1';
+#ifdef _WIN32
+            HMODULE self = nullptr;
+            wchar_t mod[MAX_PATH];
+            if (!want_hook && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                                 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                                 reinterpret_cast<LPCWSTR>(&dump_worker), &self) &&
+                GetModuleFileNameW(self, mod, MAX_PATH)) {
+                std::string dir = plat::wide_to_utf8(mod);
+                dir = dir.substr(0, dir.find_last_of("\\/"));
+                std::ifstream f(dir + "\\il2cpp_string_hook.txt");
+                std::string line;
+                if (f && std::getline(f, line))
+                    want_hook = line.find('1') != std::string::npos;
+            }
+#else
+            if (!want_hook) {
+                Dl_info info;
+                if (dladdr((void*)&dump_worker, &info) && info.dli_fname) {
+                    std::string dir = info.dli_fname;
+                    dir = dir.substr(0, dir.find_last_of('/'));
+                    std::ifstream f(dir + "/il2cpp_string_hook.txt");
+                    std::string line;
+                    if (f && std::getline(f, line))
+                        want_hook = line.find('1') != std::string::npos;
+                }
+            }
+#endif
+        }
+        if (want_hook) {
+            dlog::info("string-use hook ENABLED (live literal capture)");
             hook::install();
+        }
 
         // dump the game (funky method im aware)
         dlog::info("dumping classes...");
