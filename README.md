@@ -114,9 +114,11 @@ Method `offset` is the RVA of the method body relative to GameAssembly's base.
 Also verified against a real game (V Rising Dedicated Server, Unity 2022.3.58f1,
 metadata v31, under Wine): ~38.5k classes, 32.1k string literals.
 
-## TODO / roadmap
+## Roadmap (completed)
 
-See [TODO.md](TODO.md).
+Done in order: MinGW port -> Linux -> loader (Avalonia UI) -> multi-version
+metadata -> memory-only strings -> static + live string xrefs -> IDA plugin
+(search, usage, live-use monitor).
 
 Explicitly out of scope: DummyDll creation, dump.cs creation (the JSON + IDA
 script replace that workflow).
