@@ -1,3 +1,5 @@
+
+
 # Il2CppDumperR
 
 Runtime dumper for IL2CPP games — Windows, Wine and native Linux.
@@ -89,7 +91,8 @@ gdb -q -p $(pidof Game.x86_64) -batch \
 ### IDA
 
 Open `GameAssembly.dll`/`.so` in IDA, let autoanalysis finish, then
-`File → Script file… → ida/il2cpp_import.py`:
+`File → Script file… → ida/il2cpp_import.py` (it prompts for the JSON
+dumps):
 
 - methods are renamed to `Namespace.Class::Method` and functions created at
   their RVAs
